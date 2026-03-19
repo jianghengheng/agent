@@ -1,0 +1,54 @@
+[project]
+name = "ai-multi-agent-starter"
+version = "0.1.0"
+description = "Production-oriented multi-agent AI application scaffold built with uv, FastAPI, and LangGraph."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115.0",
+  "langchain-core>=0.3.0",
+  "langchain-openai>=0.2.0",
+  "langgraph>=0.2.40",
+  "pydantic-settings>=2.5.0",
+  "uvicorn[standard]>=0.30.0",
+]
+
+[dependency-groups]
+dev = [
+  "httpx>=0.28.0",
+  "mypy>=1.12.0",
+  "pytest>=8.3.0",
+  "pytest-asyncio>=0.24.0",
+  "ruff>=0.7.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ai_multi_agent"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+  "E",
+  "F",
+  "I",
+  "B",
+  "UP",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+packages = ["ai_multi_agent"]
+
