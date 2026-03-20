@@ -3,7 +3,7 @@ import logging
 from ai_multi_agent.core.config import Settings
 from ai_multi_agent.graph.builder import build_workflow_graph
 from ai_multi_agent.graph.state import WorkflowState
-from ai_multi_agent.llm.providers import MockLLMClient, OpenAILLMClient
+from ai_multi_agent.llm.providers import DoubaoLLMClient, MockLLMClient
 from ai_multi_agent.schemas.workflow import WorkflowRequest, WorkflowResponse
 
 logger = logging.getLogger(__name__)
@@ -43,14 +43,14 @@ class MultiAgentWorkflowService:
             trace=result.get("trace", []),
         )
 
-    def _resolve_llm(self, *, force_mock: bool) -> tuple[MockLLMClient | OpenAILLMClient, str]:
-        if force_mock or not self.settings.openai_api_key:
+    def _resolve_llm(self, *, force_mock: bool) -> tuple[MockLLMClient | DoubaoLLMClient, str]:
+        if force_mock or not self.settings.ark_api_key:
             return MockLLMClient(), "mock"
         return (
-            OpenAILLMClient(
-                model=self.settings.openai_model,
-                api_key=self.settings.openai_api_key,
-                base_url=self.settings.openai_base_url,
+            DoubaoLLMClient(
+                model=self.settings.doubao_model,
+                api_key=self.settings.ark_api_key,
+                base_url=self.settings.ark_base_url,
             ),
-            "openai",
+            "doubao",
         )

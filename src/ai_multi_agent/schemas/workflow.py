@@ -7,7 +7,7 @@ class WorkflowRequest(BaseModel):
     max_revisions: int = Field(default=1, ge=0, le=5)
     force_mock_llm: bool = Field(
         default=False,
-        description="Use the deterministic mock LLM even when OpenAI credentials are available.",
+        description="Use the deterministic mock LLM even when Doubao credentials are available.",
     )
 
 
@@ -20,4 +20,3 @@ class WorkflowResponse(BaseModel):
     critique: str
     final_answer: str
     trace: list[str]
-

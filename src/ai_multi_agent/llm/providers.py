@@ -12,10 +12,10 @@ class LLMClient(Protocol):
 
 
 @dataclass(slots=True)
-class OpenAILLMClient:
+class DoubaoLLMClient:
     model: str
     api_key: str
-    base_url: str | None = None
+    base_url: str
 
     async def ainvoke(self, *, agent_name: str, system_prompt: str, user_prompt: str) -> str:
         client = ChatOpenAI(
@@ -84,4 +84,3 @@ class MockLLMClient:
             "Next Steps:\n"
             "Integrate business tools, add auth, tracing, and domain-specific agents."
         )
-

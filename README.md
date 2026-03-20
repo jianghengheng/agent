@@ -7,7 +7,7 @@
 - `uv` 管理依赖与运行环境
 - `FastAPI` 提供 HTTP 服务
 - `LangGraph` 负责编排多智能体工作流
-- `langchain-openai` 连接 OpenAI 兼容模型
+- `langchain-openai` 以 OpenAI 兼容协议连接豆包模型
 - `pytest + ruff + mypy + GitHub Actions` 提供基础工程化能力
 
 ## 项目结构
@@ -49,7 +49,15 @@ uv sync --dev
 uv run uvicorn ai_multi_agent.main:app --factory --reload
 ```
 
-如果没有配置 `OPENAI_API_KEY`，系统会自动回退到内置 `mock` 模型，方便本地联调和测试。
+如果没有配置 `ARK_API_KEY`，系统会自动回退到内置 `mock` 模型，方便本地联调和测试。
+
+当前默认接入豆包 `doubao-seed-2-0-pro-260215`，通过火山方舟 OpenAI 兼容接口调用。至少需要配置：
+
+```bash
+ARK_API_KEY=your-ark-api-key
+ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
+DOUBAO_MODEL=doubao-seed-2-0-pro-260215
+```
 
 ## API 示例
 
@@ -75,6 +83,5 @@ curl -X POST http://127.0.0.1:8000/api/v1/workflows/multi-agent \
 
 - 在 `services` 层接入真实业务工具，例如数据库、搜索、RAG、工单系统
 - 在 `agents` 层继续拆分角色，例如 Router、Executor、Reviewer、Supervisor
-- 为 `llm/providers.py` 增加 Anthropic、Azure OpenAI 或私有模型适配器
+- 为 `llm/providers.py` 增加更多方舟模型或企业内部模型适配能力
 - 为关键流程接入 tracing、metrics、审计日志和鉴权
-

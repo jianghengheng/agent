@@ -10,9 +10,9 @@ class Settings(BaseSettings):
     app_env: str = "local"
     api_v1_prefix: str = "/api/v1"
     log_level: str = "INFO"
-    openai_api_key: str | None = None
-    openai_base_url: str | None = None
-    openai_model: str = "gpt-4.1-mini"
+    ark_api_key: str | None = None
+    ark_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
+    doubao_model: str = "doubao-seed-2-0-pro-260215"
     default_max_revisions: int = Field(default=1, ge=0, le=5)
 
     model_config = SettingsConfigDict(
@@ -26,4 +26,3 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
-
