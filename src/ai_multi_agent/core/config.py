@@ -14,6 +14,12 @@ class Settings(BaseSettings):
     ark_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     doubao_model: str = "doubao-seed-2-0-pro-260215"
     default_max_revisions: int = Field(default=1, ge=0, le=5)
+    cors_allow_origins: list[str] = Field(
+        default_factory=lambda: [
+            "http://127.0.0.1:5173",
+            "http://localhost:5173",
+        ]
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

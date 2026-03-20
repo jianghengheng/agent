@@ -1,10 +1,11 @@
+from langgraph.graph import END, START, StateGraph
+
 from ai_multi_agent.agents.critic import CriticAgent
 from ai_multi_agent.agents.planner import PlannerAgent
 from ai_multi_agent.agents.researcher import ResearchAgent
 from ai_multi_agent.agents.synthesizer import SynthesizerAgent
 from ai_multi_agent.graph.state import WorkflowState
 from ai_multi_agent.llm.providers import LLMClient
-from langgraph.graph import END, START, StateGraph
 
 
 def build_workflow_graph(llm: LLMClient) -> object:

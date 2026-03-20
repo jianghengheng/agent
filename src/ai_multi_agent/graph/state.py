@@ -1,12 +1,18 @@
 import operator
-from typing import Annotated
+from typing import Annotated, Literal
 
 from typing_extensions import TypedDict
+
+
+class ConversationMessage(TypedDict):
+    role: Literal["user", "assistant", "system"]
+    content: str
 
 
 class WorkflowState(TypedDict, total=False):
     task: str
     context: str
+    messages: list[ConversationMessage]
     plan: str
     research: str
     critique: str
@@ -15,4 +21,3 @@ class WorkflowState(TypedDict, total=False):
     revision_count: int
     max_revisions: int
     trace: Annotated[list[str], operator.add]
-
