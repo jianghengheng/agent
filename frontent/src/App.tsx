@@ -9,8 +9,6 @@ import { useAnswerStreamStore } from './stores/answerStreamStore';
 import type { ChatMessage, WorkflowApiMessage } from './types/workflow';
 
 const quickPrompts = [
-  '你好',
-  '今天天气怎么样',
   '星河店这周的销售额怎么样',
   '南京东路店上周营业额是多少',
 ];
@@ -191,17 +189,7 @@ export default function App() {
 
         <div className="chat-shell__container">
           <header className="chat-header">
-            <div>
-              <Typography.Text className="chat-header__eyebrow">
-                AI Multi-Agent Chat
-              </Typography.Text>
-              <Typography.Title className="chat-header__title" level={2}>
-                零售经营助手
-              </Typography.Title>
-              <Typography.Paragraph className="chat-header__desc">
-                面向零售经营场景的对话助手，当前先从自然问答与经营问题理解开始。
-              </Typography.Paragraph>
-            </div>
+    
 
             <Space size={[8, 8]} wrap>
               <Tag
@@ -257,20 +245,6 @@ export default function App() {
             />
           </section>
 
-          <div className="chat-quick-prompts">
-            {quickPrompts.map((prompt) => (
-              <button
-                key={prompt}
-                className="chat-quick-prompts__item"
-                onClick={() => {
-                  setDraft(prompt);
-                }}
-                type="button"
-              >
-                {prompt}
-              </button>
-            ))}
-          </div>
 
           <footer className="chat-composer">
             <Sender
@@ -291,6 +265,21 @@ export default function App() {
               value={draft}
             />
           </footer>
+
+          <div className="chat-quick-prompts">
+            {quickPrompts.map((prompt) => (
+              <button
+                key={prompt}
+                className="chat-quick-prompts__item"
+                onClick={() => {
+                  setDraft(prompt);
+                }}
+                type="button"
+              >
+                {prompt}
+              </button>
+            ))}
+          </div>
         </div>
       </main>
     </ConfigProvider>

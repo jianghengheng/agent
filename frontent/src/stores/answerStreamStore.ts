@@ -12,7 +12,7 @@ import {
 const WELCOME_MESSAGE: ChatMessage = {
   id: 'welcome-message',
   role: 'assistant',
-  content: '你好，我是零售经营助手。你可以直接问我门店经营问题，或者先做普通问答。',
+  content: '你好，我是零售经营助手。你可以直接问我门店经营问题。',
   createdAt: Date.now(),
   status: 'done',
 };
