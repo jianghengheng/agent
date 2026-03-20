@@ -1,3 +1,4 @@
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from ai_multi_agent.graph.state import WorkflowState
@@ -17,6 +18,14 @@ class BaseAgent:
             user_prompt=prompt,
         )
 
+    async def stream_complete(self, prompt: str) -> AsyncIterator[str]:
+        async for chunk in self.llm.astream(
+            agent_name=self.name,
+            system_prompt=self.system_prompt,
+            user_prompt=prompt,
+        ):
+            yield chunk
+
     @staticmethod
     def summarize_state(state: WorkflowState) -> str:
         return (
@@ -28,4 +37,3 @@ class BaseAgent:
             f"Revision Count: {state.get('revision_count', 0)} / "
             f"{state.get('max_revisions', 0)}"
         )
-

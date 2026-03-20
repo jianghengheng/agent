@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from collections.abc import AsyncIterator
 from typing import cast
@@ -63,31 +62,43 @@ class MultiAgentWorkflowService:
                 },
             }
 
-            result = await parser.run(state)
-            self._merge_state(state, result)
+            execution = await parser.prepare(state)
+            plan_markdown = parser.build_plan_markdown(execution)
+            state["plan"] = plan_markdown
+            state["trace"] = [*state.get("trace", []), "parser: retail query parsed"]
 
             yield {
                 "event": "step_completed",
                 "data": {
                     "step": "parser",
                     "iteration": 1,
-                    "trace_entry": self._extract_latest_trace_entry(result),
+                    "trace_entry": "parser: retail query parsed",
                     "content": str(state.get("plan", "")),
                 },
             }
 
-            chunks = self._chunk_text(str(state.get("final_answer", "")))
-            if chunks:
-                await asyncio.sleep(0.12)
-
-            for chunk in chunks:
+            answer_chunks: list[str] = []
+            async for chunk in parser.stream_complete(execution.answer_prompt):
+                if not chunk:
+                    continue
+                answer_chunks.append(chunk)
                 yield {
                     "event": "answer_delta",
                     "data": {
                         "delta": chunk,
                     },
                 }
-                await asyncio.sleep(self._get_chunk_delay(chunk))
+
+            final_answer = "".join(answer_chunks).strip()
+            self._merge_state(
+                state,
+                {
+                    "plan": plan_markdown,
+                    "final_answer": final_answer,
+                    "approved": True,
+                    "revision_count": 0,
+                },
+            )
 
             yield {
                 "event": "run_completed",
@@ -163,67 +174,3 @@ class MultiAgentWorkflowService:
             final_answer=str(state.get("final_answer", "")),
             trace=list(state.get("trace", [])),
         )
-
-    @staticmethod
-    def _extract_latest_trace_entry(result: dict[str, object]) -> str:
-        trace_entries = result.get("trace", [])
-        if isinstance(trace_entries, list) and trace_entries:
-            latest = trace_entries[-1]
-            if isinstance(latest, str):
-                return latest
-        return ""
-
-    @staticmethod
-    def _chunk_text(text: str, chunk_size: int = 4) -> list[str]:
-        normalized = text.strip()
-        if not normalized:
-            return []
-
-        chunks: list[str] = []
-        current = ""
-        for character in normalized:
-            current += character
-
-            should_flush = False
-            if character == "\n":
-                should_flush = True
-            elif character in {"。", "！", "？", "："}:
-                should_flush = True
-            elif len(current) >= chunk_size and character in {"，", "、", "；", " ", "\t"}:
-                should_flush = True
-            elif len(current) >= chunk_size + 1:
-                should_flush = True
-
-            if should_flush:
-                chunks.append(current)
-                current = ""
-
-        if current:
-            chunks.append(current)
-        return chunks
-
-    @staticmethod
-    def _get_chunk_delay(chunk: str) -> float:
-        normalized = chunk.strip()
-        if not normalized:
-            return 0.02
-
-        if "\n\n" in chunk:
-            return 0.18
-
-        if chunk.endswith("\n"):
-            return 0.12
-
-        if normalized[-1] in {"。", "！", "？"}:
-            return 0.11
-
-        if normalized[-1] in {"：", "；"}:
-            return 0.09
-
-        if normalized[-1] in {"，", "、"}:
-            return 0.06
-
-        if len(normalized) <= 2:
-            return 0.03
-
-        return 0.045

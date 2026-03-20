@@ -19,6 +19,19 @@ class StubLLMClient:
             return _build_parser_answer(user_prompt)
         raise AssertionError(f"unexpected agent name: {agent_name}")
 
+    async def astream(
+        self,
+        *,
+        agent_name: str,
+        system_prompt: str,
+        user_prompt: str,
+    ):
+        yield await self.ainvoke(
+            agent_name=agent_name,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        )
+
 
 class StubWorkflowService(MultiAgentWorkflowService):
     def __init__(self) -> None:
@@ -123,9 +136,12 @@ def test_retail_parser_summarizes_long_history() -> None:
     messages = [
         {
             "role": "user" if index % 2 == 0 else "assistant",
-            "content": f"第 {index + 1} 轮对话，围绕星河店的销售额、营业额和时间范围继续展开说明。",
+            "content": (
+                f"第 {index + 1} 轮对话，围绕星河店的销售额、营业额、利润、时间范围、"
+                "用户意图和历史结论继续展开说明，并补充更多经营分析背景。"
+            ),
         }
-        for index in range(12)
+        for index in range(24)
     ]
     response = client.post(
         "/api/v1/workflows/multi-agent",

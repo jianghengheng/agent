@@ -9,7 +9,7 @@ from typing import Literal
 from ai_multi_agent.agents.base import BaseAgent
 from ai_multi_agent.graph.state import ConversationMessage, WorkflowState
 
-RETAIL_METRIC_KEYWORDS = ("销售额", "销售", "营业额", "gmv", "业绩")
+RETAIL_METRIC_KEYWORDS = ("销售额", "销售", "利润", "gmv", "业绩")
 STORE_PATTERN = re.compile(r"([A-Za-z0-9\u4e00-\u9fa5·_-]{1,24}(?:店铺|门店|店))")
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9\u4e00-\u9fa5]+")
 FOLLOW_UP_MARKERS = (
@@ -27,9 +27,12 @@ FOLLOW_UP_MARKERS = (
     "本周",
 )
 NON_RETAIL_CHAT_HINTS = ("天气", "几月几号", "星期", "日期", "你好", "您好", "谢谢")
-MAX_RAW_HISTORY_MESSAGES = 8
-MAX_RAW_HISTORY_CHARACTERS = 1200
 RECENT_HISTORY_MESSAGES = 6
+RAW_HISTORY_MESSAGES_LIMIT = 12
+RAW_HISTORY_CHARACTERS_LIMIT = 4000
+SUMMARY_TRIGGER_MESSAGES = 20
+SUMMARY_TRIGGER_CHARACTERS = 8000
+RECENT_ONLY_MESSAGES = 8
 
 
 @dataclass(slots=True)
@@ -45,15 +48,28 @@ class RetailQueryResult:
 
 @dataclass(slots=True)
 class ConversationContextBundle:
-    mode: Literal["none", "raw", "summary"]
+    mode: Literal["none", "raw", "recent_only", "summary"]
     summary: str
     recent_messages: list[ConversationMessage]
     last_user_message: str | None
     last_assistant_message: str | None
 
 
+@dataclass(slots=True)
+class RetailParserExecution:
+    result: RetailQueryResult
+    conversation_bundle: ConversationContextBundle
+    answer_prompt: str
+
+
 class RetailParserAgent(BaseAgent):
     async def run(self, state: WorkflowState) -> dict[str, object]:
+        execution = await self.prepare(state)
+        answer_markdown = await self.complete(execution.answer_prompt)
+
+        return self._build_result_payload(execution=execution, answer_markdown=answer_markdown)
+
+    async def prepare(self, state: WorkflowState) -> RetailParserExecution:
         task = state.get("task", "")
         history_messages = _normalize_history_messages(state.get("messages", []))
         result = parse_retail_query(task, history_messages=history_messages)
@@ -62,17 +78,28 @@ class RetailParserAgent(BaseAgent):
             context=state.get("context", ""),
             history_messages=history_messages,
         )
-        answer_markdown = await self.complete(
-            _build_answer_prompt(
+        return RetailParserExecution(
+            result=result,
+            conversation_bundle=conversation_bundle,
+            answer_prompt=_build_answer_prompt(
                 task=task,
                 context=state.get("context", ""),
                 result=result,
                 conversation_bundle=conversation_bundle,
-            )
+            ),
         )
 
+    def build_plan_markdown(self, execution: RetailParserExecution) -> str:
+        return _build_plan_markdown(execution.result, execution.conversation_bundle)
+
+    def _build_result_payload(
+        self,
+        *,
+        execution: RetailParserExecution,
+        answer_markdown: str,
+    ) -> dict[str, object]:
         return {
-            "plan": _build_plan_markdown(result, conversation_bundle),
+            "plan": _build_plan_markdown(execution.result, execution.conversation_bundle),
             "final_answer": answer_markdown,
             "approved": True,
             "revision_count": 0,
@@ -100,13 +127,25 @@ class RetailParserAgent(BaseAgent):
         last_assistant_message = _find_last_message_content(history_messages, role="assistant")
 
         if (
-            len(history_messages) <= MAX_RAW_HISTORY_MESSAGES
-            and total_characters <= MAX_RAW_HISTORY_CHARACTERS
+            len(history_messages) <= RAW_HISTORY_MESSAGES_LIMIT
+            and total_characters <= RAW_HISTORY_CHARACTERS_LIMIT
         ):
             return ConversationContextBundle(
                 mode="raw",
                 summary="",
                 recent_messages=history_messages,
+                last_user_message=last_user_message,
+                last_assistant_message=last_assistant_message,
+            )
+
+        if (
+            len(history_messages) <= SUMMARY_TRIGGER_MESSAGES
+            and total_characters <= SUMMARY_TRIGGER_CHARACTERS
+        ):
+            return ConversationContextBundle(
+                mode="recent_only",
+                summary="",
+                recent_messages=history_messages[-RECENT_ONLY_MESSAGES:],
                 last_user_message=last_user_message,
                 last_assistant_message=last_assistant_message,
             )
@@ -126,7 +165,7 @@ class RetailParserAgent(BaseAgent):
             mode="summary" if summary else "raw",
             summary=summary,
             recent_messages=(
-                recent_messages if summary else history_messages[-MAX_RAW_HISTORY_MESSAGES:]
+                recent_messages if summary else history_messages[-RAW_HISTORY_MESSAGES_LIMIT:]
             ),
             last_user_message=last_user_message,
             last_assistant_message=last_assistant_message,
@@ -396,6 +435,8 @@ def _build_plan_markdown(
     history_note = "无历史消息"
     if conversation_bundle.mode == "raw":
         history_note = f"直接携带 {len(conversation_bundle.recent_messages)} 条历史消息"
+    if conversation_bundle.mode == "recent_only":
+        history_note = f"仅保留最近 {len(conversation_bundle.recent_messages)} 条历史消息"
     if conversation_bundle.mode == "summary":
         history_note = (
             f"较早历史已摘要，保留最近 {len(conversation_bundle.recent_messages)} 条原始消息"
@@ -423,6 +464,7 @@ def _build_answer_prompt(
     history_mode_label = {
         "none": "no_history",
         "raw": "raw_history",
+        "recent_only": "recent_history_only",
         "summary": "summarized_history",
     }[conversation_bundle.mode]
 
