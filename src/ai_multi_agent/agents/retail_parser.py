@@ -27,6 +27,30 @@ FOLLOW_UP_MARKERS = (
     "本周",
 )
 NON_RETAIL_CHAT_HINTS = ("天气", "几月几号", "星期", "日期", "你好", "您好", "谢谢")
+STORE_PREFIXES = (
+    "今天的",
+    "今日的",
+    "昨天的",
+    "昨日的",
+    "本周的",
+    "这周的",
+    "上周的",
+    "本月的",
+    "这月的",
+    "这个月的",
+    "上个月的",
+    "今天",
+    "今日",
+    "昨天",
+    "昨日",
+    "本周",
+    "这周",
+    "上周",
+    "本月",
+    "这月",
+    "这个月",
+    "上个月",
+)
 RECENT_HISTORY_MESSAGES = 6
 RAW_HISTORY_MESSAGES_LIMIT = 12
 RAW_HISTORY_CHARACTERS_LIMIT = 4000
@@ -43,6 +67,9 @@ class RetailQueryResult:
     store_name: str | None
     start_date: str | None
     end_date: str | None
+    comparison_type: str | None
+    comparison_start_date: str | None
+    comparison_end_date: str | None
     current_date: str
 
 
@@ -228,13 +255,35 @@ def parse_retail_query(
         merged_keywords = keywords
         if history_context:
             merged_keywords = _merge_keywords(keywords, history_context.keywords)
+        resolved_metric = (
+            metric or (history_context.metric if history_context else None) or "销售额"
+        )
+        resolved_store_name = store_name or (
+            history_context.store_name if history_context else None
+        )
+        resolved_start_date = start_date or (
+            history_context.start_date if history_context else None
+        )
+        resolved_end_date = end_date or (history_context.end_date if history_context else None)
+        comparison_type = _resolve_comparison_type(
+            task=normalized_task,
+            history_context=history_context,
+        )
+        comparison_start_date, comparison_end_date = _build_comparison_date_range(
+            start_date=resolved_start_date,
+            end_date=resolved_end_date,
+            comparison_type=comparison_type,
+        )
         return RetailQueryResult(
             query_type="retail_metric_query",
             keywords=merged_keywords,
-            metric=metric or (history_context.metric if history_context else None) or "销售额",
-            store_name=store_name or (history_context.store_name if history_context else None),
-            start_date=start_date or (history_context.start_date if history_context else None),
-            end_date=end_date or (history_context.end_date if history_context else None),
+            metric=resolved_metric,
+            store_name=resolved_store_name,
+            start_date=resolved_start_date,
+            end_date=resolved_end_date,
+            comparison_type=comparison_type,
+            comparison_start_date=comparison_start_date,
+            comparison_end_date=comparison_end_date,
             current_date=current_day.isoformat(),
         )
 
@@ -245,6 +294,9 @@ def parse_retail_query(
         store_name=None,
         start_date=None,
         end_date=None,
+        comparison_type=None,
+        comparison_start_date=None,
+        comparison_end_date=None,
         current_date=current_day.isoformat(),
     )
 
@@ -278,7 +330,7 @@ def _extract_store_name(task: str) -> str | None:
     if not match:
         return None
 
-    store_name = match.group(1).strip("，。！？、 ")
+    store_name = _strip_store_prefixes(match.group(1).strip("，。！？、 "))
     return store_name or None
 
 
@@ -348,6 +400,83 @@ def _extract_date_range(task: str, current_day: date) -> tuple[str | None, str |
     return None, None
 
 
+def _resolve_comparison_type(
+    *,
+    task: str,
+    history_context: RetailQueryResult | None,
+) -> str:
+    explicit = _extract_explicit_comparison_type(task)
+    if explicit:
+        return explicit
+
+    if history_context and history_context.comparison_type:
+        return history_context.comparison_type
+
+    return "同比"
+
+
+def _extract_explicit_comparison_type(task: str) -> str | None:
+    if "环比" in task:
+        return "环比"
+
+    year_over_year_markers = (
+        "同比",
+        "去年同期",
+        "较去年",
+        "对比去年",
+        "和去年比",
+    )
+    if any(marker in task for marker in year_over_year_markers):
+        return "同比"
+
+    month_over_month_markers = (
+        "比上周",
+        "较上周",
+        "对比上周",
+        "和上周比",
+        "比上月",
+        "较上月",
+        "对比上月",
+        "和上月比",
+    )
+    if any(marker in task for marker in month_over_month_markers):
+        return "环比"
+
+    return None
+
+
+def _build_comparison_date_range(
+    *,
+    start_date: str | None,
+    end_date: str | None,
+    comparison_type: str | None,
+) -> tuple[str | None, str | None]:
+    if not start_date or not end_date or not comparison_type:
+        return None, None
+
+    start_day = date.fromisoformat(start_date)
+    end_day = date.fromisoformat(end_date)
+
+    if comparison_type == "同比":
+        return (
+            _safe_replace_year(start_day, start_day.year - 1).isoformat(),
+            _safe_replace_year(end_day, end_day.year - 1).isoformat(),
+        )
+
+    if comparison_type == "环比":
+        period_days = (end_day - start_day).days + 1
+        previous_end = start_day - timedelta(days=1)
+        previous_start = previous_end - timedelta(days=period_days - 1)
+        return previous_start.isoformat(), previous_end.isoformat()
+
+    return None, None
+
+
+def _safe_replace_year(day: date, target_year: int) -> date:
+    max_day = calendar.monthrange(target_year, day.month)[1]
+    return day.replace(year=target_year, day=min(day.day, max_day))
+
+
 def _extract_history_retail_context(
     history_messages: list[ConversationMessage],
     current_day: date,
@@ -361,6 +490,17 @@ def _extract_history_retail_context(
             return candidate
 
     return None
+
+
+def _strip_store_prefixes(store_name: str) -> str:
+    normalized = store_name
+    while True:
+        for prefix in STORE_PREFIXES:
+            if normalized.startswith(prefix):
+                normalized = normalized.removeprefix(prefix).strip()
+                break
+        else:
+            return normalized
 
 
 def _merge_keywords(current_keywords: list[str], history_keywords: list[str]) -> list[str]:
@@ -449,6 +589,12 @@ def _build_plan_markdown(
             f"- 关键词：{', '.join(result.keywords) if result.keywords else '未识别'}",
             f"- 店铺：{result.store_name or '未识别'}",
             f"- 时间范围：{result.start_date or '未识别'} ~ {result.end_date or '未识别'}",
+            f"- 对比方式：{result.comparison_type or '未识别'}",
+            (
+                "- 对比时间范围："
+                f"{result.comparison_start_date or '未识别'} ~ "
+                f"{result.comparison_end_date or '未识别'}"
+            ),
             f"- 上下文处理：{history_note}",
         ]
     )
@@ -490,6 +636,9 @@ def _build_answer_prompt(
             f"Store Name: {result.store_name or '未识别'}",
             f"Start Date: {result.start_date or '未识别'}",
             f"End Date: {result.end_date or '未识别'}",
+            f"Comparison Type: {result.comparison_type or '未识别'}",
+            f"Comparison Start Date: {result.comparison_start_date or '未识别'}",
+            f"Comparison End Date: {result.comparison_end_date or '未识别'}",
             "",
             "## Conversation Summary",
             conversation_bundle.summary or "无",
@@ -502,6 +651,7 @@ def _build_answer_prompt(
             "- 对普通问题，直接回答用户问题本身。",
             "- 对零售问题，先给出一句直接回应，再给出解析结果。",
             "- 如果当前问句省略了店铺、指标或时间，但上下文足够明确，可以自然继承。",
+            "- 对零售问题，如果用户未明确指定，默认按同比理解。",
             "- 如果上下文仍不足以明确零售参数，要明确指出缺失项。",
             "- 不要输出“我是第一个智能体”这类空话，除非有必要解释当前能力边界。",
         ]

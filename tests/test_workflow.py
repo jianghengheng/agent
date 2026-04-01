@@ -1,7 +1,9 @@
 import json
+from collections.abc import AsyncIterator, Callable
 from datetime import date, timedelta
 
 from fastapi.testclient import TestClient
+from httpx import Response
 
 from ai_multi_agent.api.dependencies import get_workflow_service
 from ai_multi_agent.app import create_app
@@ -25,7 +27,7 @@ class StubLLMClient:
         agent_name: str,
         system_prompt: str,
         user_prompt: str,
-    ):
+    ) -> AsyncIterator[str]:
         yield await self.ainvoke(
             agent_name=agent_name,
             system_prompt=system_prompt,
@@ -39,6 +41,22 @@ class StubWorkflowService(MultiAgentWorkflowService):
 
     def _resolve_llm(self) -> tuple[LLMClient, str]:
         return StubLLMClient(), "stub"
+
+
+class FailingWorkflowService(MultiAgentWorkflowService):
+    def __init__(self) -> None:
+        super().__init__(settings=Settings(ark_api_key="stub-key"))
+
+    def _resolve_llm(self) -> tuple[LLMClient, str]:
+        raise RuntimeError("llm resolve failed")
+
+
+def create_test_client_with_service(
+    service_factory: Callable[[], MultiAgentWorkflowService],
+) -> TestClient:
+    app = create_app()
+    app.dependency_overrides[get_workflow_service] = service_factory
+    return TestClient(app)
 
 
 def create_test_client() -> TestClient:
@@ -173,41 +191,85 @@ def test_retail_parser_stream_returns_sse_events() -> None:
     ) as response:
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/event-stream")
+        events = _collect_sse_events(response)
 
-        events: list[tuple[str, dict[str, object]]] = []
-        current_event = ""
-        current_data: list[str] = []
+    event_names = [name for name, _ in events]
+    assert event_names[0] == "run_started"
+    assert "step_started" in event_names
+    assert "step_completed" in event_names
+    assert "answer_delta" in event_names
+    assert event_names[-1] == "run_completed"
 
-        for raw_line in response.iter_lines():
-            line = raw_line if isinstance(raw_line, str) else raw_line.decode()
-            if line == "":
-                if current_event:
-                    events.append((current_event, json.loads("\n".join(current_data))))
-                current_event = ""
-                current_data = []
-                continue
+    step_completed_event = next(data for name, data in events if name == "step_completed")
+    assert step_completed_event["step"] == "parser"
 
-            if line.startswith("event: "):
-                current_event = line.removeprefix("event: ")
-                continue
+    completed_payload = events[-1][1]["response"]
+    assert isinstance(completed_payload, dict)
+    assert completed_payload["backend"] == "retail-parser/stub"
+    assert "星河店" in completed_payload["final_answer"]
 
-            if line.startswith("data: "):
-                current_data.append(line.removeprefix("data: "))
 
-        event_names = [name for name, _ in events]
-        assert event_names[0] == "run_started"
-        assert "step_started" in event_names
-        assert "step_completed" in event_names
-        assert "answer_delta" in event_names
-        assert event_names[-1] == "run_completed"
+def test_retail_parser_falls_back_to_mock_when_ark_key_missing() -> None:
+    client = create_test_client_with_service(
+        lambda: MultiAgentWorkflowService(settings=Settings(ark_api_key=None))
+    )
+    response = client.post(
+        "/api/v1/workflows/multi-agent",
+        json={
+            "task": "星河店这周的销售额怎么样",
+            "context": "",
+            "max_revisions": 1,
+        },
+    )
 
-        step_completed_event = next(data for name, data in events if name == "step_completed")
-        assert step_completed_event["step"] == "parser"
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["backend"] == "retail-parser/mock"
+    assert "mock 回退模型输出" in payload["final_answer"]
 
-        completed_payload = events[-1][1]["response"]
-        assert isinstance(completed_payload, dict)
-        assert completed_payload["backend"] == "retail-parser/stub"
-        assert "星河店" in completed_payload["final_answer"]
+
+def test_retail_parser_stream_returns_error_event_when_llm_resolve_fails() -> None:
+    client = create_test_client_with_service(lambda: FailingWorkflowService())
+    with client.stream(
+        "POST",
+        "/api/v1/workflows/multi-agent/stream",
+        json={
+            "task": "星河店这周的销售额怎么样",
+            "context": "",
+            "max_revisions": 1,
+        },
+    ) as response:
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        events = _collect_sse_events(response)
+
+    event_names = [name for name, _ in events]
+    assert event_names == ["error"]
+    assert "llm resolve failed" in str(events[0][1]["message"])
+
+
+def _collect_sse_events(response: Response) -> list[tuple[str, dict[str, object]]]:
+    events: list[tuple[str, dict[str, object]]] = []
+    current_event = ""
+    current_data: list[str] = []
+
+    for raw_line in response.iter_lines():
+        line = raw_line if isinstance(raw_line, str) else raw_line.decode()
+        if line == "":
+            if current_event:
+                events.append((current_event, json.loads("\n".join(current_data))))
+            current_event = ""
+            current_data = []
+            continue
+
+        if line.startswith("event: "):
+            current_event = line.removeprefix("event: ")
+            continue
+
+        if line.startswith("data: "):
+            current_data.append(line.removeprefix("data: "))
+
+    return events
 
 
 def _build_parser_answer(user_prompt: str) -> str:

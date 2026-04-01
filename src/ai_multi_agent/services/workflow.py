@@ -5,7 +5,7 @@ from typing import cast
 from ai_multi_agent.agents.retail_parser import RetailParserAgent
 from ai_multi_agent.core.config import Settings
 from ai_multi_agent.graph.state import WorkflowState
-from ai_multi_agent.llm.providers import DoubaoLLMClient, LLMClient
+from ai_multi_agent.llm.providers import DoubaoLLMClient, LLMClient, MockLLMClient
 from ai_multi_agent.schemas.workflow import (
     WorkflowRequest,
     WorkflowResponse,
@@ -29,21 +29,22 @@ class MultiAgentWorkflowService:
         raise RuntimeError("workflow execution ended without a completion event")
 
     async def stream(self, request: WorkflowRequest) -> AsyncIterator[WorkflowStreamEvent]:
-        llm, llm_backend = self._resolve_llm()
-        backend = f"retail-parser/{llm_backend}"
-        parser = RetailParserAgent(
-            name="parser",
-            system_prompt=(
-                "You are a retail operations assistant focused on question understanding and "
-                "high-quality direct answers."
-            ),
-            llm=llm,
-        )
         state = self._build_initial_state(request)
 
-        logger.info("running retail parser workflow with backend=%s", backend)
-
         try:
+            llm, llm_backend = self._resolve_llm()
+            backend = f"retail-parser/{llm_backend}"
+            parser = RetailParserAgent(
+                name="parser",
+                system_prompt=(
+                    "You are a retail operations assistant focused on question understanding and "
+                    "high-quality direct answers."
+                ),
+                llm=llm,
+            )
+
+            logger.info("running retail parser workflow with backend=%s", backend)
+
             yield {
                 "event": "run_started",
                 "data": {
@@ -74,6 +75,14 @@ class MultiAgentWorkflowService:
                     "iteration": 1,
                     "trace_entry": "parser: retail query parsed",
                     "content": str(state.get("plan", "")),
+                },
+            }
+
+            yield {
+                "event": "answer_started",
+                "data": {
+                    "step": "parser",
+                    "message": "answer stream requested",
                 },
             }
 
@@ -119,7 +128,8 @@ class MultiAgentWorkflowService:
 
     def _resolve_llm(self) -> tuple[LLMClient, str]:
         if not self.settings.ark_api_key:
-            raise RuntimeError("ARK_API_KEY 未配置，无法调用真实模型。")
+            logger.warning("ARK_API_KEY not configured, fallback to mock llm backend")
+            return MockLLMClient(), "mock"
 
         return (
             DoubaoLLMClient(

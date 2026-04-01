@@ -4,14 +4,17 @@ import { XMarkdown } from '@ant-design/x-markdown';
 import { Avatar, Button, Card, ConfigProvider, Space, Tag, Typography } from 'antd';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
-import { runWorkflowStream } from './services/workflowStream';
+import { runWorkflowStream, type WorkflowTimingStage, type WorkflowTimingSummary } from './services/workflowStream';
 import { useAnswerStreamStore } from './stores/answerStreamStore';
 import type { ChatMessage, WorkflowApiMessage } from './types/workflow';
 
 const quickPrompts = [
-  '星河店这周的销售额怎么样',
-  '南京东路店上周营业额是多少',
+  'xxx这周的销售额怎么样',
+  'xxx店上周营业额是多少',
 ];
+const MAX_HISTORY_MESSAGES = 8;
+const MAX_USER_HISTORY_CHARACTERS = 240;
+const MAX_NON_USER_HISTORY_CHARACTERS = 320;
 
 function formatTime(timestamp: number) {
   return new Intl.DateTimeFormat('zh-CN', {
@@ -36,6 +39,150 @@ function getStepTagColor(status: 'pending' | 'running' | 'completed' | 'failed')
   return 'default';
 }
 
+function normalizeHistoryText(content: string) {
+  return content
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
+    .replace(/^\s{0,3}#{1,6}\s+/gm, '')
+    .replace(/^\s*[-*+]\s+/gm, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function truncateHistoryText(content: string, maxCharacters: number) {
+  if (content.length <= maxCharacters) {
+    return content;
+  }
+
+  return `${content.slice(0, maxCharacters).trimEnd()}...`;
+}
+
+function compactHistoryMessage(message: WorkflowApiMessage): WorkflowApiMessage {
+  const normalizedContent = normalizeHistoryText(message.content);
+  const maxCharacters =
+    message.role === 'user'
+      ? MAX_USER_HISTORY_CHARACTERS
+      : MAX_NON_USER_HISTORY_CHARACTERS;
+
+  return {
+    ...message,
+    content: truncateHistoryText(normalizedContent, maxCharacters),
+  };
+}
+
+function formatDurationSeconds(durationMs: number) {
+  return `${(durationMs / 1000).toFixed(2)}s`;
+}
+
+function createRenderCompletedStage(
+  summary: WorkflowTimingSummary,
+  renderCompletedAt: number,
+): WorkflowTimingStage | null {
+  const { runCompletedAt } = summary.checkpoints;
+  if (runCompletedAt === null || renderCompletedAt < runCompletedAt) {
+    return null;
+  }
+
+  return {
+    label: '接口完成到页面完成展示',
+    durationMs: renderCompletedAt - runCompletedAt,
+  };
+}
+
+function logWorkflowTimingSummary(
+  prompt: string,
+  summary: WorkflowTimingSummary,
+  renderCompletedAt: number,
+) {
+  const renderStage = createRenderCompletedStage(summary, renderCompletedAt);
+  const stages = renderStage ? [...summary.stages, renderStage] : [...summary.stages];
+  const totalDurationMs = renderCompletedAt - summary.checkpoints.requestStartedAt;
+  const longestStage = stages.reduce<WorkflowTimingStage | null>((currentLongest, stage) => {
+    if (!currentLongest || stage.durationMs > currentLongest.durationMs) {
+      return stage;
+    }
+    return currentLongest;
+  }, null);
+
+  console.groupCollapsed(
+    `[Workflow Timing] 总耗时 ${formatDurationSeconds(totalDurationMs)} | ${prompt}`,
+  );
+  console.info('总耗时:', formatDurationSeconds(totalDurationMs));
+  console.info(
+    '最长耗时阶段:',
+    longestStage
+      ? `${longestStage.label} (${formatDurationSeconds(longestStage.durationMs)})`
+      : '无',
+  );
+  console.table(
+    stages.map((stage) => ({
+      阶段: stage.label,
+      耗时毫秒: Number(stage.durationMs.toFixed(2)),
+      耗时秒: formatDurationSeconds(stage.durationMs),
+    })),
+  );
+  console.table([
+    {
+      请求开始: 0,
+      收到响应头:
+        summary.checkpoints.responseStartedAt === null
+          ? 'N/A'
+          : formatDurationSeconds(
+              summary.checkpoints.responseStartedAt - summary.checkpoints.requestStartedAt,
+            ),
+      首个事件:
+        summary.checkpoints.firstEventAt === null
+          ? 'N/A'
+          : formatDurationSeconds(
+              summary.checkpoints.firstEventAt - summary.checkpoints.requestStartedAt,
+            ),
+      解析开始:
+        summary.checkpoints.parserStartedAt === null
+          ? 'N/A'
+          : formatDurationSeconds(
+              summary.checkpoints.parserStartedAt - summary.checkpoints.requestStartedAt,
+            ),
+      解析完成:
+        summary.checkpoints.parserCompletedAt === null
+          ? 'N/A'
+          : formatDurationSeconds(
+              summary.checkpoints.parserCompletedAt - summary.checkpoints.requestStartedAt,
+            ),
+      发起模型流请求:
+        summary.checkpoints.answerStartedAt === null
+          ? 'N/A'
+          : formatDurationSeconds(
+              summary.checkpoints.answerStartedAt - summary.checkpoints.requestStartedAt,
+            ),
+      首个回答分片:
+        summary.checkpoints.firstAnswerDeltaAt === null
+          ? 'N/A'
+          : formatDurationSeconds(
+              summary.checkpoints.firstAnswerDeltaAt - summary.checkpoints.requestStartedAt,
+            ),
+      接口完成:
+        summary.checkpoints.runCompletedAt === null
+          ? 'N/A'
+          : formatDurationSeconds(
+              summary.checkpoints.runCompletedAt - summary.checkpoints.requestStartedAt,
+            ),
+      页面完成展示: formatDurationSeconds(totalDurationMs),
+    },
+  ]);
+  console.groupEnd();
+}
+
+function logWorkflowTimingAfterPaint(prompt: string, summary: WorkflowTimingSummary) {
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      logWorkflowTimingSummary(prompt, summary, performance.now());
+    });
+  });
+}
+
 function toConversationHistory(
   messages: ChatMessage[],
   currentPrompt: string,
@@ -48,7 +195,9 @@ function toConversationHistory(
     .map((message) => ({
       role: message.role,
       content: message.content.trim(),
-    }));
+    }))
+    .map(compactHistoryMessage)
+    .slice(-MAX_HISTORY_MESSAGES);
 }
 
 export default function App() {
@@ -145,7 +294,7 @@ export default function App() {
       assistantMessageId,
     });
 
-    await runWorkflowStream(
+    const timingSummary = await runWorkflowStream(
       {
         task: prompt,
         context: '',
@@ -164,6 +313,10 @@ export default function App() {
         onError: failRun,
       },
     );
+
+    if (timingSummary) {
+      logWorkflowTimingAfterPaint(prompt, timingSummary);
+    }
   };
 
   const handleClearConversation = () => {

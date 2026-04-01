@@ -8,6 +8,7 @@ export type WorkflowStreamEventName =
   | 'run_started'
   | 'step_started'
   | 'step_completed'
+  | 'answer_started'
   | 'answer_delta'
   | 'run_completed'
   | 'error';

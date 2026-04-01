@@ -10,6 +10,29 @@ import {
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000';
 const ONLY_STEP: StepIdentifier = 'parser';
 
+type WorkflowTimingCheckpoints = {
+  requestStartedAt: number;
+  responseStartedAt: number | null;
+  firstEventAt: number | null;
+  runStartedAt: number | null;
+  parserStartedAt: number | null;
+  parserCompletedAt: number | null;
+  answerStartedAt: number | null;
+  firstAnswerDeltaAt: number | null;
+  runCompletedAt: number | null;
+};
+
+export type WorkflowTimingStage = {
+  label: string;
+  durationMs: number;
+};
+
+export type WorkflowTimingSummary = {
+  checkpoints: WorkflowTimingCheckpoints;
+  stages: WorkflowTimingStage[];
+  streamCompletedAt: number;
+};
+
 type RunWorkflowStreamInput = {
   task: string;
   context: string;
@@ -43,6 +66,136 @@ function ensureNotAborted(signal: AbortSignal) {
   if (signal.aborted) {
     throw new DOMException('The operation was aborted.', 'AbortError');
   }
+}
+
+function createWorkflowTimingCheckpoints(): WorkflowTimingCheckpoints {
+  return {
+    requestStartedAt: performance.now(),
+    responseStartedAt: null,
+    firstEventAt: null,
+    runStartedAt: null,
+    parserStartedAt: null,
+    parserCompletedAt: null,
+    answerStartedAt: null,
+    firstAnswerDeltaAt: null,
+    runCompletedAt: null,
+  };
+}
+
+function markWorkflowTimingCheckpoint(
+  checkpoints: WorkflowTimingCheckpoints,
+  key: keyof WorkflowTimingCheckpoints,
+  timestamp: number,
+) {
+  if (checkpoints[key] === null) {
+    checkpoints[key] = timestamp;
+  }
+}
+
+function recordWorkflowEventTiming(
+  event: WorkflowStreamEvent,
+  checkpoints: WorkflowTimingCheckpoints,
+) {
+  const timestamp = performance.now();
+  markWorkflowTimingCheckpoint(checkpoints, 'firstEventAt', timestamp);
+
+  if (event.event === 'run_started') {
+    markWorkflowTimingCheckpoint(checkpoints, 'runStartedAt', timestamp);
+    return;
+  }
+
+  if (event.event === 'step_started' && event.data.step === ONLY_STEP) {
+    markWorkflowTimingCheckpoint(checkpoints, 'parserStartedAt', timestamp);
+    return;
+  }
+
+  if (event.event === 'step_completed' && event.data.step === ONLY_STEP) {
+    markWorkflowTimingCheckpoint(checkpoints, 'parserCompletedAt', timestamp);
+    return;
+  }
+
+  if (event.event === 'answer_started' && event.data.step === ONLY_STEP) {
+    markWorkflowTimingCheckpoint(checkpoints, 'answerStartedAt', timestamp);
+    return;
+  }
+
+  if (event.event === 'answer_delta') {
+    markWorkflowTimingCheckpoint(checkpoints, 'firstAnswerDeltaAt', timestamp);
+    return;
+  }
+
+  if (event.event === 'run_completed') {
+    markWorkflowTimingCheckpoint(checkpoints, 'runCompletedAt', timestamp);
+  }
+}
+
+function createTimingStage(
+  label: string,
+  start: number | null,
+  end: number | null,
+): WorkflowTimingStage | null {
+  if (start === null || end === null || end < start) {
+    return null;
+  }
+
+  return {
+    label,
+    durationMs: end - start,
+  };
+}
+
+function buildWorkflowTimingSummary(
+  checkpoints: WorkflowTimingCheckpoints,
+): WorkflowTimingSummary {
+  const streamCompletedAt = performance.now();
+  const stages = [
+    createTimingStage(
+      '发起请求到收到响应头',
+      checkpoints.requestStartedAt,
+      checkpoints.responseStartedAt,
+    ),
+    createTimingStage(
+      '收到响应头到首个 SSE 事件',
+      checkpoints.responseStartedAt,
+      checkpoints.firstEventAt,
+    ),
+    createTimingStage(
+      '工作流启动到开始解析',
+      checkpoints.runStartedAt,
+      checkpoints.parserStartedAt,
+    ),
+    createTimingStage(
+      '解析阶段',
+      checkpoints.parserStartedAt,
+      checkpoints.parserCompletedAt,
+    ),
+    createTimingStage(
+      '解析完成到发起模型流请求',
+      checkpoints.parserCompletedAt,
+      checkpoints.answerStartedAt,
+    ),
+    createTimingStage(
+      '模型流请求到首个回答分片',
+      checkpoints.answerStartedAt,
+      checkpoints.firstAnswerDeltaAt,
+    ),
+    createTimingStage(
+      '流式回答阶段',
+      checkpoints.firstAnswerDeltaAt,
+      checkpoints.runCompletedAt,
+    ),
+    createTimingStage(
+      '接口完成收尾',
+      checkpoints.runCompletedAt,
+      streamCompletedAt,
+    ),
+  ].filter((stage): stage is WorkflowTimingStage => stage !== null);
+
+  return {
+    checkpoints,
+    stages,
+    streamCompletedAt,
+  };
 }
 
 function createWorkflowRequest(
@@ -138,6 +291,20 @@ function applyServerEvent(
     return null;
   }
 
+  if (event.event === 'answer_started') {
+    const stepId = event.data.step;
+
+    if (isStepIdentifier(stepId)) {
+      handlers.onActiveRole(stepId);
+      handlers.onStepChange(stepId, {
+        status: 'running',
+        detail: '已发起模型请求，等待首个回答分片。',
+      });
+      handlers.onStatusNote('已发起模型请求，等待首个回答分片。');
+    }
+    return null;
+  }
+
   if (event.event === 'answer_delta') {
     const delta = typeof event.data.delta === 'string' ? event.data.delta : '';
     if (delta) {
@@ -183,8 +350,9 @@ function applyServerEvent(
 async function runApiWorkflowStream(
   input: RunWorkflowStreamInput,
   handlers: RunWorkflowStreamHandlers,
-) {
+): Promise<WorkflowTimingSummary> {
   const steps = createInitialProcessSteps();
+  const checkpoints = createWorkflowTimingCheckpoints();
   handlers.onPrepare(steps);
   handlers.onBackendLabel('SSE connecting');
   handlers.onStatusNote('正在建立 SSE 连接。');
@@ -205,6 +373,7 @@ async function runApiWorkflowStream(
     body: JSON.stringify(request),
     signal: input.signal,
   });
+  checkpoints.responseStartedAt = performance.now();
 
   if (!response.ok) {
     throw new Error(`SSE 接口请求失败，状态码 ${response.status}`);
@@ -242,6 +411,7 @@ async function runApiWorkflowStream(
         continue;
       }
 
+      recordWorkflowEventTiming(event, checkpoints);
       const completedPayload = applyServerEvent(event, handlers);
       if (completedPayload) {
         finalResponse = completedPayload;
@@ -253,6 +423,7 @@ async function runApiWorkflowStream(
   if (buffer.trim()) {
     const lastEvent = parseSseEventBlock(buffer);
     if (lastEvent) {
+      recordWorkflowEventTiming(lastEvent, checkpoints);
       const completedPayload = applyServerEvent(lastEvent, handlers);
       if (completedPayload) {
         finalResponse = completedPayload;
@@ -265,20 +436,22 @@ async function runApiWorkflowStream(
   }
 
   handlers.onComplete();
+  return buildWorkflowTimingSummary(checkpoints);
 }
 
 export async function runWorkflowStream(
   input: RunWorkflowStreamInput,
   handlers: RunWorkflowStreamHandlers,
-) {
+): Promise<WorkflowTimingSummary | null> {
   try {
-    await runApiWorkflowStream(input, handlers);
+    return await runApiWorkflowStream(input, handlers);
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') {
-      return;
+      return null;
     }
 
     const message = error instanceof Error ? error.message : '回答流执行失败。';
     handlers.onError(message);
+    return null;
   }
 }
