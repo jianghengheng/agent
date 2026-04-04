@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -13,7 +13,15 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     ark_api_key: str | None = None
     ark_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
-    doubao_model: str = "doubao-seed-2-0-pro-260215"
+    ark_model: str = Field(
+        default="mimo-v2-pro",
+        validation_alias=AliasChoices(
+            "ARK_MODEL",
+            "DOUBAO_MODEL",
+            "ark_model",
+            "doubao_model",
+        ),
+    )
     default_max_revisions: int = Field(default=1, ge=0, le=5)
     cors_allow_origins: list[str] = Field(
         default_factory=lambda: [
@@ -28,6 +36,11 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
     )
+
+    @property
+    def doubao_model(self) -> str:
+        # Backward compatibility for callers still using the old field name.
+        return self.ark_model
 
 
 @lru_cache

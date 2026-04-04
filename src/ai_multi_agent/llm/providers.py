@@ -24,7 +24,7 @@ class LLMClient(Protocol):
 
 
 @dataclass(slots=True)
-class DoubaoLLMClient:
+class ArkLLMClient:
     model: str
     api_key: str
     base_url: str
@@ -37,12 +37,8 @@ class DoubaoLLMClient:
             base_url=self.base_url,
             streaming=False,
         )
-        response = await client.ainvoke(
-            [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=user_prompt),
-            ]
-        )
+        messages = _build_messages(self.model, system_prompt, user_prompt)
+        response = await client.ainvoke(messages)
         return str(response.content)
 
     async def astream(
@@ -218,3 +214,7 @@ def _normalize_chunk_content(content: object) -> str:
         return str(content)
 
     return ""
+
+
+# Backward compatibility for older imports.
+DoubaoLLMClient = ArkLLMClient

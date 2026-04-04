@@ -8,7 +8,7 @@ from httpx import Response
 from ai_multi_agent.api.dependencies import get_workflow_service
 from ai_multi_agent.app import create_app
 from ai_multi_agent.core.config import Settings
-from ai_multi_agent.llm.providers import LLMClient
+from ai_multi_agent.llm.providers import ArkLLMClient, LLMClient
 from ai_multi_agent.services.workflow import MultiAgentWorkflowService
 
 
@@ -226,6 +226,17 @@ def test_retail_parser_falls_back_to_mock_when_ark_key_missing() -> None:
     payload = response.json()
     assert payload["backend"] == "retail-parser/mock"
     assert "mock 回退模型输出" in payload["final_answer"]
+
+
+def test_retail_parser_resolves_ark_backend_with_model_name() -> None:
+    service = MultiAgentWorkflowService(
+        settings=Settings(ark_api_key="stub-key", ARK_MODEL="mimo-v2-pro")
+    )
+
+    llm, backend = service._resolve_llm()
+
+    assert isinstance(llm, ArkLLMClient)
+    assert backend == "ark/mimo-v2-pro"
 
 
 def test_retail_parser_stream_returns_error_event_when_llm_resolve_fails() -> None:

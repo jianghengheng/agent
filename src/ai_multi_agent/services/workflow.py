@@ -5,7 +5,7 @@ from typing import cast
 from ai_multi_agent.agents.retail_parser import RetailParserAgent
 from ai_multi_agent.core.config import Settings
 from ai_multi_agent.graph.state import WorkflowState
-from ai_multi_agent.llm.providers import DoubaoLLMClient, LLMClient, MockLLMClient
+from ai_multi_agent.llm.providers import ArkLLMClient, LLMClient, MockLLMClient
 from ai_multi_agent.schemas.workflow import (
     WorkflowRequest,
     WorkflowResponse,
@@ -132,12 +132,12 @@ class MultiAgentWorkflowService:
             return MockLLMClient(), "mock"
 
         return (
-            DoubaoLLMClient(
-                model=self.settings.doubao_model,
+            ArkLLMClient(
+                model=self.settings.ark_model,
                 api_key=self.settings.ark_api_key,
                 base_url=self.settings.ark_base_url,
             ),
-            "doubao",
+            f"ark/{self.settings.ark_model}",
         )
 
     @staticmethod

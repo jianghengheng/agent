@@ -7,7 +7,7 @@
 - `uv` 管理依赖与运行环境
 - `FastAPI` 提供 HTTP 服务
 - `LangGraph` 负责编排多智能体工作流
-- `langchain-openai` 以 OpenAI 兼容协议连接豆包模型
+- `langchain-openai` 以 OpenAI 兼容协议连接方舟/第三方模型
 - `pytest + ruff + mypy + GitHub Actions` 提供基础工程化能力
 
 ## 项目结构
@@ -51,13 +51,21 @@ uv run uvicorn ai_multi_agent.main:app --factory --reload
 
 如果没有配置 `ARK_API_KEY`，系统会自动回退到内置 `mock` 模型，方便本地联调和测试。
 
-当前默认接入豆包 `doubao-seed-2-0-pro-260215`，通过火山方舟 OpenAI 兼容接口调用。至少需要配置：
+当前默认模型为 `mimo-v2-pro`，通过 OpenAI 兼容接口调用。至少需要配置：
 
 ```bash
 ARK_API_KEY=your-ark-api-key
 ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
-DOUBAO_MODEL=doubao-seed-2-0-pro-260215
+ARK_MODEL=mimo-v2-pro
 ```
+
+如果你使用小米 Mimo 的兼容网关，可将 `ARK_BASE_URL` 配置为：
+
+```bash
+ARK_BASE_URL=https://api.xiaomimimo.com/v1
+```
+
+为兼容旧配置，`DOUBAO_MODEL` 仍可作为 `ARK_MODEL` 的别名使用。
 
 ## API 示例
 
