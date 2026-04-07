@@ -1,6 +1,8 @@
 import json
+import re
 from collections.abc import AsyncIterator, Callable
 from datetime import date, timedelta
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 from httpx import Response
@@ -17,8 +19,12 @@ class StubLLMClient:
         _ = system_prompt
         if agent_name == "parser_summarizer":
             return "- 历史对话已压缩摘要。"
+        if agent_name == "date_extractor":
+            return _build_stub_date_json(user_prompt)
         if agent_name == "parser":
             return _build_parser_answer(user_prompt)
+        if agent_name == "data_fetcher":
+            return "## 数据分析\n暂无真实数据（stub 模式）。"
         raise AssertionError(f"unexpected agent name: {agent_name}")
 
     async def astream(
@@ -65,7 +71,16 @@ def create_test_client() -> TestClient:
     return TestClient(app)
 
 
-def test_retail_parser_extracts_store_and_week_range() -> None:
+def _mock_fetch_data():
+    return patch(
+        "ai_multi_agent.agents.data_fetcher.DataFetcherAgent._fetch_data",
+        new_callable=AsyncMock,
+        return_value=None,
+    )
+
+
+@_mock_fetch_data()
+def test_retail_parser_extracts_store_and_week_range(_mock: AsyncMock) -> None:
     client = create_test_client()
     response = client.post(
         "/api/v1/workflows/multi-agent",
@@ -94,7 +109,8 @@ def test_retail_parser_extracts_store_and_week_range() -> None:
     assert week_end.isoformat() in payload["final_answer"]
 
 
-def test_retail_parser_handles_normal_question() -> None:
+@_mock_fetch_data()
+def test_retail_parser_handles_normal_question(_mock: AsyncMock) -> None:
     client = create_test_client()
     response = client.post(
         "/api/v1/workflows/multi-agent",
@@ -113,7 +129,8 @@ def test_retail_parser_handles_normal_question() -> None:
     assert "号" in payload["final_answer"]
 
 
-def test_retail_parser_can_inherit_context_from_history() -> None:
+@_mock_fetch_data()
+def test_retail_parser_can_inherit_context_from_history(_mock: AsyncMock) -> None:
     client = create_test_client()
     response = client.post(
         "/api/v1/workflows/multi-agent",
@@ -149,7 +166,8 @@ def test_retail_parser_can_inherit_context_from_history() -> None:
     assert last_week_end.isoformat() in payload["final_answer"]
 
 
-def test_retail_parser_summarizes_long_history() -> None:
+@_mock_fetch_data()
+def test_retail_parser_summarizes_long_history(_mock: AsyncMock) -> None:
     client = create_test_client()
     messages = [
         {
@@ -178,7 +196,8 @@ def test_retail_parser_summarizes_long_history() -> None:
     assert "较早历史已摘要" in payload["plan"]
 
 
-def test_retail_parser_stream_returns_sse_events() -> None:
+@_mock_fetch_data()
+def test_retail_parser_stream_returns_sse_events(_mock: AsyncMock) -> None:
     client = create_test_client()
     with client.stream(
         "POST",
@@ -209,7 +228,8 @@ def test_retail_parser_stream_returns_sse_events() -> None:
     assert "星河店" in completed_payload["final_answer"]
 
 
-def test_retail_parser_falls_back_to_mock_when_ark_key_missing() -> None:
+@_mock_fetch_data()
+def test_retail_parser_falls_back_to_mock_when_ark_key_missing(_mock: AsyncMock) -> None:
     client = create_test_client_with_service(
         lambda: MultiAgentWorkflowService(settings=Settings(ark_api_key=None))
     )
@@ -239,7 +259,8 @@ def test_retail_parser_resolves_ark_backend_with_model_name() -> None:
     assert backend == "ark/mimo-v2-pro"
 
 
-def test_retail_parser_stream_returns_error_event_when_llm_resolve_fails() -> None:
+@_mock_fetch_data()
+def test_retail_parser_stream_returns_error_event_when_llm_resolve_fails(_mock: AsyncMock) -> None:
     client = create_test_client_with_service(lambda: FailingWorkflowService())
     with client.stream(
         "POST",
@@ -334,3 +355,24 @@ def _extract_prompt_field(prompt: str, field_name: str) -> str:
         if line.startswith(prefix):
             return line.removeprefix(prefix).strip()
     return ""
+
+
+def _build_stub_date_json(user_prompt: str) -> str:
+    today = date.today()
+    task_match = re.search(r"用户问题：(.+)", user_prompt)
+    task = task_match.group(1).strip() if task_match else ""
+
+    if "这周" in task or "本周" in task:
+        ws = today - timedelta(days=today.weekday())
+        we = ws + timedelta(days=6)
+        return json.dumps({"start_date": ws.isoformat(), "end_date": we.isoformat(), "comparison_type": "同比"})
+
+    if "上周" in task:
+        ws = today - timedelta(days=today.weekday()) - timedelta(days=7)
+        we = ws + timedelta(days=6)
+        return json.dumps({"start_date": ws.isoformat(), "end_date": we.isoformat(), "comparison_type": "同比"})
+
+    if "今天" in task or "今日" in task:
+        return json.dumps({"start_date": today.isoformat(), "end_date": today.isoformat(), "comparison_type": "同比"})
+
+    return json.dumps({"start_date": None, "end_date": None, "comparison_type": "同比"})

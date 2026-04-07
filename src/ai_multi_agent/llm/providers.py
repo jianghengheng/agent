@@ -37,7 +37,7 @@ class ArkLLMClient:
             base_url=self.base_url,
             streaming=False,
         )
-        messages = _build_messages(self.model, system_prompt, user_prompt)
+        messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
         response = await client.ainvoke(messages)
         return str(response.content)
 
@@ -82,6 +82,9 @@ class MockLLMClient:
         _ = system_prompt
         if agent_name == "parser_summarizer":
             return "- 较早历史已摘要。\n- 关键信息已保留：门店、指标、时间范围、未解决问题。"
+
+        if agent_name == "date_extractor":
+            return _build_mock_date_json(user_prompt)
 
         return _build_mock_parser_answer(user_prompt)
 
@@ -214,6 +217,34 @@ def _normalize_chunk_content(content: object) -> str:
         return str(content)
 
     return ""
+
+
+def _build_mock_date_json(user_prompt: str) -> str:
+    import json
+    from datetime import date as _date
+    from datetime import timedelta as _timedelta
+
+    today = _date.today()
+    task = ""
+    for line in user_prompt.splitlines():
+        if line.startswith("用户问题："):
+            task = line.removeprefix("用户问题：").strip()
+            break
+
+    if "今天" in task or "今日" in task:
+        d = today.isoformat()
+        return json.dumps({"start_date": d, "end_date": d, "comparison_type": "同比"})
+
+    if "昨天" in task or "昨日" in task:
+        d = (today - _timedelta(days=1)).isoformat()
+        return json.dumps({"start_date": d, "end_date": d, "comparison_type": "同比"})
+
+    if "本周" in task or "这周" in task:
+        ws = today - _timedelta(days=today.weekday())
+        we = ws + _timedelta(days=6)
+        return json.dumps({"start_date": ws.isoformat(), "end_date": we.isoformat(), "comparison_type": "同比"})
+
+    return json.dumps({"start_date": None, "end_date": None, "comparison_type": "同比"})
 
 
 # Backward compatibility for older imports.

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import calendar
+import json
 import re
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -26,7 +28,12 @@ FOLLOW_UP_MARKERS = (
     "这周",
     "本周",
 )
-NON_RETAIL_CHAT_HINTS = ("天气", "几月几号", "星期", "日期", "你好", "您好", "谢谢")
+NON_RETAIL_CHAT_HINTS = (
+    "天气", "几月几号", "几号", "几月", "星期", "日期", "几点",
+    "今天是", "现在是", "什么时候",
+    "你好", "您好", "谢谢", "感谢", "再见", "拜拜",
+    "你是谁", "你叫什么", "介绍一下你",
+)
 STORE_PREFIXES = (
     "今天的",
     "今日的",
@@ -65,6 +72,7 @@ class RetailQueryResult:
     keywords: list[str]
     metric: str | None
     store_name: str | None
+    store_flag: bool
     start_date: str | None
     end_date: str | None
     comparison_type: str | None
@@ -100,21 +108,130 @@ class RetailParserAgent(BaseAgent):
         task = state.get("task", "")
         history_messages = _normalize_history_messages(state.get("messages", []))
         result = parse_retail_query(task, history_messages=history_messages)
+
+        # Run date extraction and conversation context in parallel
+        async def _resolve_dates() -> RetailQueryResult:
+            if result.query_type == "retail_metric_query":
+                return await self._resolve_dates_with_llm(task, result, history_messages)
+            return result
+
+        resolved_result, conversation_bundle = await asyncio.gather(
+            _resolve_dates(),
+            self._prepare_conversation_context(
+                task=task,
+                context=state.get("context", ""),
+                history_messages=history_messages,
+            ),
+        )
+
+        return RetailParserExecution(
+            result=resolved_result,
+            conversation_bundle=conversation_bundle,
+            answer_prompt=_build_answer_prompt(
+                task=task,
+                context=state.get("context", ""),
+                result=resolved_result,
+                conversation_bundle=conversation_bundle,
+            ),
+        )
+
+    async def resolve_dates_only(self, state: WorkflowState) -> RetailQueryResult:
+        """Only resolve dates (LLM call). Returns quickly for non-retail queries."""
+        task = state.get("task", "")
+        history_messages = _normalize_history_messages(state.get("messages", []))
+        result = parse_retail_query(task, history_messages=history_messages)
+        if result.query_type == "retail_metric_query":
+            return await self._resolve_dates_with_llm(task, result, history_messages)
+        return result
+
+    async def prepare_context_only(
+        self, state: WorkflowState, resolved_result: RetailQueryResult,
+    ) -> RetailParserExecution:
+        """Build conversation context and execution (no date LLM call)."""
+        task = state.get("task", "")
+        history_messages = _normalize_history_messages(state.get("messages", []))
         conversation_bundle = await self._prepare_conversation_context(
             task=task,
             context=state.get("context", ""),
             history_messages=history_messages,
         )
         return RetailParserExecution(
-            result=result,
+            result=resolved_result,
             conversation_bundle=conversation_bundle,
             answer_prompt=_build_answer_prompt(
                 task=task,
                 context=state.get("context", ""),
-                result=result,
+                result=resolved_result,
                 conversation_bundle=conversation_bundle,
             ),
         )
+
+    async def _resolve_dates_with_llm(
+        self,
+        task: str,
+        result: RetailQueryResult,
+        history_messages: list[ConversationMessage],
+    ) -> RetailQueryResult:
+        history_hint = ""
+        if history_messages:
+            recent = history_messages[-4:]
+            history_hint = "最近对话：\n" + _format_messages(recent)
+
+        prompt = DATE_EXTRACTION_PROMPT.format(
+            current_date=result.current_date,
+            task=task,
+            history_hint=history_hint,
+        )
+
+        try:
+            raw = await self.llm.ainvoke(
+                agent_name="date_extractor",
+                system_prompt="You extract dates from Chinese text. Output JSON only.",
+                user_prompt=prompt,
+            )
+            parsed = _parse_date_json(raw.strip())
+
+            start_date = parsed.get("start_date")
+            end_date = parsed.get("end_date")
+            comparison_type = parsed.get("comparison_type", "同比")
+
+            if start_date and not _is_valid_date(start_date):
+                start_date = None
+            if end_date and not _is_valid_date(end_date):
+                end_date = None
+            if not end_date and start_date:
+                end_date = start_date
+
+            if comparison_type not in ("同比", "环比"):
+                comparison_type = "同比"
+
+            comparison_start_date, comparison_end_date = _build_comparison_date_range(
+                start_date=start_date,
+                end_date=end_date,
+                comparison_type=comparison_type,
+            )
+
+            print(f"\n🤖 AI 日期解析结果：start={start_date}, end={end_date}, "
+                  f"comparison_type={comparison_type}, "
+                  f"comp_start={comparison_start_date}, comp_end={comparison_end_date}")
+
+            return RetailQueryResult(
+                query_type=result.query_type,
+                keywords=result.keywords,
+                metric=result.metric,
+                store_name=result.store_name,
+                store_flag=result.store_flag,
+                start_date=start_date,
+                end_date=end_date,
+                comparison_type=comparison_type,
+                comparison_start_date=comparison_start_date,
+                comparison_end_date=comparison_end_date,
+                current_date=result.current_date,
+            )
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception("AI date extraction failed, dates unresolved")
+            return result
 
     def build_plan_markdown(self, execution: RetailParserExecution) -> str:
         return _build_plan_markdown(execution.result, execution.conversation_bundle)
@@ -242,48 +359,34 @@ def parse_retail_query(
     keywords = _extract_keywords(normalized_task)
     metric = _extract_metric(normalized_task)
     store_name = _extract_store_name(normalized_task)
-    start_date, end_date = _extract_date_range(normalized_task, current_day)
 
     if _should_treat_as_retail_query(
         task=normalized_task,
         metric=metric,
         store_name=store_name,
-        start_date=start_date,
-        end_date=end_date,
+        start_date=None,
+        end_date=None,
         history_context=history_context,
     ):
         merged_keywords = keywords
         if history_context:
             merged_keywords = _merge_keywords(keywords, history_context.keywords)
-        resolved_metric = (
-            metric or (history_context.metric if history_context else None) or "销售额"
-        )
+        resolved_metric = metric or (history_context.metric if history_context else None)
         resolved_store_name = store_name or (
             history_context.store_name if history_context else None
         )
-        resolved_start_date = start_date or (
-            history_context.start_date if history_context else None
-        )
-        resolved_end_date = end_date or (history_context.end_date if history_context else None)
-        comparison_type = _resolve_comparison_type(
-            task=normalized_task,
-            history_context=history_context,
-        )
-        comparison_start_date, comparison_end_date = _build_comparison_date_range(
-            start_date=resolved_start_date,
-            end_date=resolved_end_date,
-            comparison_type=comparison_type,
-        )
+        store_flag = _resolve_store_flag(normalized_task, history_context)
         return RetailQueryResult(
             query_type="retail_metric_query",
             keywords=merged_keywords,
             metric=resolved_metric,
             store_name=resolved_store_name,
-            start_date=resolved_start_date,
-            end_date=resolved_end_date,
-            comparison_type=comparison_type,
-            comparison_start_date=comparison_start_date,
-            comparison_end_date=comparison_end_date,
+            store_flag=store_flag,
+            start_date=None,
+            end_date=None,
+            comparison_type=None,
+            comparison_start_date=None,
+            comparison_end_date=None,
             current_date=current_day.isoformat(),
         )
 
@@ -292,6 +395,7 @@ def parse_retail_query(
         keywords=keywords,
         metric=None,
         store_name=None,
+        store_flag=True,
         start_date=None,
         end_date=None,
         comparison_type=None,
@@ -334,11 +438,6 @@ def _extract_store_name(task: str) -> str | None:
     return store_name or None
 
 
-def _is_retail_metric_query(task: str) -> bool:
-    lowered = task.lower()
-    return any(keyword in lowered for keyword in RETAIL_METRIC_KEYWORDS)
-
-
 def _should_treat_as_retail_query(
     *,
     task: str,
@@ -348,56 +447,87 @@ def _should_treat_as_retail_query(
     end_date: str | None,
     history_context: RetailQueryResult | None,
 ) -> bool:
-    if _is_retail_metric_query(task):
-        return True
-
-    if not history_context:
-        return False
-
     if any(hint in task for hint in NON_RETAIL_CHAT_HINTS):
         return False
 
-    if metric or store_name or start_date or end_date:
+    # Must have at least one retail signal: metric keyword, store name, or retail history context
+    if metric:
+        return True
+    if store_name:
+        return True
+    if history_context:
         return True
 
-    return len(task) <= 20 and any(marker in task for marker in FOLLOW_UP_MARKERS)
+    # Check for any retail-related keywords in the task
+    retail_signals = (
+        "销售", "业绩", "利润", "毛利", "营收", "收入", "gmv",
+        "会员", "客流", "人效", "门店", "店铺",
+        "环比", "同比", "增长", "下降", "对比",
+        "蛋糕", "现烤", "线上", "堂食",
+    )
+    if any(signal in task.lower() for signal in retail_signals):
+        return True
+
+    return False
 
 
-def _extract_date_range(task: str, current_day: date) -> tuple[str | None, str | None]:
-    if "今天" in task or "今日" in task:
-        return current_day.isoformat(), current_day.isoformat()
+DATE_EXTRACTION_PROMPT = """\
+你是一个日期提取器。根据用户的问题、对话历史和当前日期，提取出用户想查询的时间范围。
 
-    if "昨天" in task or "昨日" in task:
-        yesterday = current_day - timedelta(days=1)
-        return yesterday.isoformat(), yesterday.isoformat()
+当前日期：{current_date}
 
-    if "这周" in task or "本周" in task:
-        week_start = current_day - timedelta(days=current_day.weekday())
-        week_end = week_start + timedelta(days=6)
-        return week_start.isoformat(), week_end.isoformat()
+用户问题：{task}
 
-    if "上周" in task:
-        this_week_start = current_day - timedelta(days=current_day.weekday())
-        week_start = this_week_start - timedelta(days=7)
-        week_end = week_start + timedelta(days=6)
-        return week_start.isoformat(), week_end.isoformat()
+{history_hint}
 
-    if "这月" in task or "本月" in task or "这个月" in task:
-        month_start = current_day.replace(day=1)
-        month_end = current_day.replace(
-            day=calendar.monthrange(current_day.year, current_day.month)[1]
-        )
-        return month_start.isoformat(), month_end.isoformat()
+请严格按以下 JSON 格式输出，不要输出任何其他内容：
+{{"start_date": "yyyy-MM-dd", "end_date": "yyyy-MM-dd", "comparison_type": "同比或环比"}}
 
-    if "上个月" in task:
-        previous_month_last_day = current_day.replace(day=1) - timedelta(days=1)
-        month_start = previous_month_last_day.replace(day=1)
-        month_end = previous_month_last_day.replace(
-            day=calendar.monthrange(previous_month_last_day.year, previous_month_last_day.month)[1]
-        )
-        return month_start.isoformat(), month_end.isoformat()
+规则：
+- start_date 和 end_date 是用户想查的时间范围，格式 yyyy-MM-dd
+- "1月"/"2月"等不带年份时，默认为当前年
+- "去年"/"前年"等要换算成具体年份
+- "去年3月" = 去年3月1日到3月最后一天
+- "上周" = 上周一到上周日
+- "昨天" = 昨天那一天
+- 如果用户当前问题没有提到时间，但对话历史中有明确的时间范围，继承对话历史中最近一次的时间范围
+- 只有当用户问题和对话历史中都完全没有提到任何时间时，start_date 和 end_date 才输出 null
+- comparison_type：用户说"环比"就输出"环比"，否则默认"同比"
+- 只输出 JSON，不要解释\
+"""
 
-    return None, None
+
+_JSON_BLOCK_PATTERN = re.compile(r"\{[^}]+\}")
+
+
+def _parse_date_json(raw: str) -> dict[str, str | None]:
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    match = _JSON_BLOCK_PATTERN.search(cleaned)
+    if match:
+        return json.loads(match.group())
+    return {}
+
+
+def _is_valid_date(value: str) -> bool:
+    try:
+        date.fromisoformat(value)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+FAMILY_KEYWORDS = ("家族", "族群", "全部家族", "所有家族")
+
+
+def _resolve_store_flag(task: str, history_context: RetailQueryResult | None) -> bool:
+    if any(keyword in task for keyword in FAMILY_KEYWORDS):
+        return False
+    if history_context and not history_context.store_flag:
+        return False
+    return True
 
 
 def _resolve_comparison_type(
@@ -616,43 +746,44 @@ def _build_answer_prompt(
 
     return "\n".join(
         [
-            "你是零售经营助手的第一个智能体，当前职责是：",
+            "你是零售经营助手，当前职责是：",
             "1. 理解用户问题。",
             "2. 如果是普通问题，就直接回答用户，不要模板化自我介绍。",
             "3. 如果是零售经营问题，就结合已解析参数回答；"
-            "如果没有真实数据，要明确说明当前是参数解析阶段，"
-            "暂时没有真实经营数据。",
+            "当前没有真实数据，请明确告知用户正在查询中或数据暂未获取到。",
             "4. 输出必须是中文 Markdown。",
             "",
-            f"Business Context: {context or '无'}",
-            f"Current Date: {result.current_date}",
-            f"History Mode: {history_mode_label}",
-            f"Last User Message: {conversation_bundle.last_user_message or '无'}",
-            f"Last Assistant Message: {conversation_bundle.last_assistant_message or '无'}",
-            f"Question Type: {result.query_type}",
-            f"User Question: {task}",
-            f"Keywords: {', '.join(result.keywords) if result.keywords else '未识别'}",
-            f"Metric: {result.metric or '未识别'}",
-            f"Store Name: {result.store_name or '未识别'}",
-            f"Start Date: {result.start_date or '未识别'}",
-            f"End Date: {result.end_date or '未识别'}",
-            f"Comparison Type: {result.comparison_type or '未识别'}",
-            f"Comparison Start Date: {result.comparison_start_date or '未识别'}",
-            f"Comparison End Date: {result.comparison_end_date or '未识别'}",
+            "## 核心原则",
+            "- **严禁编造任何数字、金额、百分比或统计数据**。",
+            "- 不要从对话历史中提取数字来拼凑表格或列表。",
+            "- 如果当前没有真实数据，只描述已解析的参数，不要生成带有数值的表格。",
+            "- 不要使用 xxx、待统计 等占位符来伪造数据表格。",
             "",
-            "## Conversation Summary",
+            f"业务上下文：{context or '无'}",
+            f"当前日期：{result.current_date}",
+            f"上下文模式：{history_mode_label}",
+            f"问句类型：{result.query_type}",
+            f"用户问题：{task}",
+            f"关键词：{', '.join(result.keywords) if result.keywords else '未识别'}",
+            f"指标：{result.metric or '未识别'}",
+            f"店铺名称：{result.store_name or '未识别'}",
+            f"开始日期：{result.start_date or '未识别'}",
+            f"结束日期：{result.end_date or '未识别'}",
+            f"对比方式：{result.comparison_type or '未识别'}",
+            f"对比开始日期：{result.comparison_start_date or '未识别'}",
+            f"对比结束日期：{result.comparison_end_date or '未识别'}",
+            "",
+            "## 对话摘要",
             conversation_bundle.summary or "无",
             "",
-            "## Recent Conversation",
+            "## 近期对话",
             _format_messages(conversation_bundle.recent_messages),
             "",
             "回答要求：",
             "- 优先结合上下文回答追问。",
             "- 对普通问题，直接回答用户问题本身。",
-            "- 对零售问题，先给出一句直接回应，再给出解析结果。",
+            "- 对零售问题，告知用户已识别到的查询参数，说明数据正在获取中。",
             "- 如果当前问句省略了店铺、指标或时间，但上下文足够明确，可以自然继承。",
-            "- 对零售问题，如果用户未明确指定，默认按同比理解。",
             "- 如果上下文仍不足以明确零售参数，要明确指出缺失项。",
-            "- 不要输出“我是第一个智能体”这类空话，除非有必要解释当前能力边界。",
         ]
     )

@@ -33,6 +33,8 @@ WorkflowStreamEventName = Literal[
     "run_started",
     "step_started",
     "step_completed",
+    "api_request",
+    "api_response",
     "answer_started",
     "answer_delta",
     "run_completed",

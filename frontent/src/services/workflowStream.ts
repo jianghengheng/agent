@@ -1,4 +1,6 @@
 import {
+  type ApiRequestInfo,
+  type ApiResponseInfo,
   type StepIdentifier,
   type WorkflowApiMessage,
   type WorkflowApiRequest,
@@ -8,7 +10,7 @@ import {
 } from '../types/workflow';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000';
-const ONLY_STEP: StepIdentifier = 'parser';
+const VALID_STEPS: StepIdentifier[] = ['parser', 'data_fetcher'];
 
 type WorkflowTimingCheckpoints = {
   requestStartedAt: number;
@@ -17,6 +19,8 @@ type WorkflowTimingCheckpoints = {
   runStartedAt: number | null;
   parserStartedAt: number | null;
   parserCompletedAt: number | null;
+  dataFetcherStartedAt: number | null;
+  dataFetcherCompletedAt: number | null;
   answerStartedAt: number | null;
   firstAnswerDeltaAt: number | null;
   runCompletedAt: number | null;
@@ -55,6 +59,8 @@ type RunWorkflowStreamHandlers = {
       endedAt?: number;
       startedAt?: number;
       status?: 'pending' | 'running' | 'completed' | 'failed';
+      apiRequest?: ApiRequestInfo;
+      apiResponse?: ApiResponseInfo;
     },
   ) => void;
   onAnswerDelta: (delta: string) => void;
@@ -76,6 +82,8 @@ function createWorkflowTimingCheckpoints(): WorkflowTimingCheckpoints {
     runStartedAt: null,
     parserStartedAt: null,
     parserCompletedAt: null,
+    dataFetcherStartedAt: null,
+    dataFetcherCompletedAt: null,
     answerStartedAt: null,
     firstAnswerDeltaAt: null,
     runCompletedAt: null,
@@ -104,17 +112,27 @@ function recordWorkflowEventTiming(
     return;
   }
 
-  if (event.event === 'step_started' && event.data.step === ONLY_STEP) {
+  if (event.event === 'step_started' && event.data.step === 'parser') {
     markWorkflowTimingCheckpoint(checkpoints, 'parserStartedAt', timestamp);
     return;
   }
 
-  if (event.event === 'step_completed' && event.data.step === ONLY_STEP) {
+  if (event.event === 'step_completed' && event.data.step === 'parser') {
     markWorkflowTimingCheckpoint(checkpoints, 'parserCompletedAt', timestamp);
     return;
   }
 
-  if (event.event === 'answer_started' && event.data.step === ONLY_STEP) {
+  if (event.event === 'step_started' && event.data.step === 'data_fetcher') {
+    markWorkflowTimingCheckpoint(checkpoints, 'dataFetcherStartedAt', timestamp);
+    return;
+  }
+
+  if (event.event === 'step_completed' && event.data.step === 'data_fetcher') {
+    markWorkflowTimingCheckpoint(checkpoints, 'dataFetcherCompletedAt', timestamp);
+    return;
+  }
+
+  if (event.event === 'answer_started') {
     markWorkflowTimingCheckpoint(checkpoints, 'answerStartedAt', timestamp);
     return;
   }
@@ -170,8 +188,13 @@ function buildWorkflowTimingSummary(
       checkpoints.parserCompletedAt,
     ),
     createTimingStage(
-      '解析完成到发起模型流请求',
-      checkpoints.parserCompletedAt,
+      '数据获取阶段',
+      checkpoints.dataFetcherStartedAt,
+      checkpoints.dataFetcherCompletedAt,
+    ),
+    createTimingStage(
+      '数据获取完成到发起模型流请求',
+      checkpoints.dataFetcherCompletedAt ?? checkpoints.parserCompletedAt,
       checkpoints.answerStartedAt,
     ),
     createTimingStage(
@@ -213,7 +236,7 @@ function createWorkflowRequest(
 }
 
 function isStepIdentifier(value: unknown): value is StepIdentifier {
-  return value === ONLY_STEP;
+  return VALID_STEPS.includes(value as StepIdentifier);
 }
 
 function parseSseEventBlock(rawBlock: string): WorkflowStreamEvent | null {
@@ -251,6 +274,24 @@ function getStepCompletedDetail(data: Record<string, unknown>) {
   return traceEntry || '问题解析完成，开始输出 Markdown 回答。';
 }
 
+function getStepStartedDetail(stepId: StepIdentifier): string {
+  if (stepId === 'parser') return '正在识别问句类型并抽取关键词。';
+  if (stepId === 'data_fetcher') return '正在调用经营数据接口。';
+  return '正在执行。';
+}
+
+function getStepStartedNote(stepId: StepIdentifier): string {
+  if (stepId === 'parser') return 'Parser 正在解析问题。';
+  if (stepId === 'data_fetcher') return 'Data Fetcher 正在获取数据。';
+  return '步骤执行中。';
+}
+
+function getStepCompletedNote(stepId: StepIdentifier): string {
+  if (stepId === 'parser') return '问题解析完成，开始获取数据。';
+  if (stepId === 'data_fetcher') return '数据获取完成，准备输出回答。';
+  return '步骤完成。';
+}
+
 function applyServerEvent(
   event: WorkflowStreamEvent,
   handlers: RunWorkflowStreamHandlers,
@@ -269,10 +310,10 @@ function applyServerEvent(
       handlers.onActiveRole(stepId);
       handlers.onStepChange(stepId, {
         status: 'running',
-        detail: '正在识别问句类型并抽取关键词。',
+        detail: getStepStartedDetail(stepId),
         startedAt: Date.now(),
       });
-      handlers.onStatusNote('Parser 正在解析问题。');
+      handlers.onStatusNote(getStepStartedNote(stepId));
     }
     return null;
   }
@@ -286,30 +327,46 @@ function applyServerEvent(
         detail: getStepCompletedDetail(event.data),
         endedAt: Date.now(),
       });
-      handlers.onStatusNote('问题解析完成，准备输出回答。');
+      handlers.onStatusNote(getStepCompletedNote(stepId));
     }
     return null;
   }
 
-  if (event.event === 'answer_started') {
-    const stepId = event.data.step;
+  if (event.event === 'api_request') {
+    const requestInfo = event.data as unknown as ApiRequestInfo;
+    handlers.onStepChange('data_fetcher', {
+      apiRequest: requestInfo,
+      detail: `正在请求 ${requestInfo.method} ${requestInfo.url}`,
+    });
+    handlers.onStatusNote(`正在调用接口: ${requestInfo.url}`);
+    return null;
+  }
 
-    if (isStepIdentifier(stepId)) {
-      handlers.onActiveRole(stepId);
-      handlers.onStepChange(stepId, {
-        status: 'running',
-        detail: '已发起模型请求，等待首个回答分片。',
-      });
-      handlers.onStatusNote('已发起模型请求，等待首个回答分片。');
-    }
+  if (event.event === 'api_response') {
+    const responseInfo = event.data as unknown as ApiResponseInfo;
+    handlers.onStepChange('data_fetcher', {
+      apiResponse: responseInfo,
+      detail: `接口返回 ${responseInfo.record_count} 条数据记录`,
+    });
+    handlers.onStatusNote(`接口返回 ${responseInfo.record_count} 条数据，正在分析。`);
+    return null;
+  }
+
+  if (event.event === 'answer_started') {
+    handlers.onActiveRole('parser');
+    handlers.onStepChange('parser', {
+      status: 'running',
+      detail: '已发起模型请求，等待首个回答分片。',
+    });
+    handlers.onStatusNote('已发起模型请求，等待首个回答分片。');
     return null;
   }
 
   if (event.event === 'answer_delta') {
     const delta = typeof event.data.delta === 'string' ? event.data.delta : '';
     if (delta) {
-      handlers.onActiveRole(ONLY_STEP);
-      handlers.onStepChange(ONLY_STEP, {
+      handlers.onActiveRole('parser');
+      handlers.onStepChange('parser', {
         status: 'running',
         detail: '正在流式输出 Markdown 回答。',
         startedAt: Date.now(),
@@ -326,11 +383,13 @@ function applyServerEvent(
       const payload = response as WorkflowApiResponse;
       handlers.onBackendLabel(`SSE / ${payload.backend}`);
       handlers.onActiveRole(null);
-      handlers.onStepChange(ONLY_STEP, {
-        status: 'completed',
-        detail: '本轮解析与回答已完成。',
-        endedAt: Date.now(),
-      });
+      for (const stepId of VALID_STEPS) {
+        handlers.onStepChange(stepId, {
+          status: 'completed',
+          detail: '本轮解析与回答已完成。',
+          endedAt: Date.now(),
+        });
+      }
       handlers.onStatusNote('接口流已完成。');
       return payload;
     }

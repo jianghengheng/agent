@@ -1,4 +1,4 @@
-export type StepIdentifier = 'parser';
+export type StepIdentifier = 'parser' | 'data_fetcher';
 
 export type StepStatus = 'pending' | 'running' | 'completed' | 'failed';
 
@@ -8,10 +8,24 @@ export type WorkflowStreamEventName =
   | 'run_started'
   | 'step_started'
   | 'step_completed'
+  | 'api_request'
+  | 'api_response'
   | 'answer_started'
   | 'answer_delta'
   | 'run_completed'
   | 'error';
+
+export type ApiRequestInfo = {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  params: Record<string, string | number>;
+};
+
+export type ApiResponseInfo = {
+  record_count: number;
+  records: Record<string, unknown>[];
+};
 
 export type ProcessStep = {
   id: StepIdentifier;
@@ -21,6 +35,8 @@ export type ProcessStep = {
   detail?: string;
   startedAt?: number;
   endedAt?: number;
+  apiRequest?: ApiRequestInfo;
+  apiResponse?: ApiResponseInfo;
 };
 
 export type ChatMessageRole = 'user' | 'assistant' | 'system';
@@ -67,6 +83,12 @@ export function createInitialProcessSteps(): ProcessStep[] {
       id: 'parser',
       title: 'Parser',
       summary: '识别问句类型并抽取店铺、指标、时间范围',
+      status: 'pending',
+    },
+    {
+      id: 'data_fetcher',
+      title: 'Data Fetcher',
+      summary: '调用经营数据接口获取真实数据并分析',
       status: 'pending',
     },
   ];
