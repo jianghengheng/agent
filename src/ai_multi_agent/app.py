@@ -1,4 +1,3 @@
-import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -17,18 +16,6 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     yield
 
 
-def _get_cors_origins() -> list[str]:
-    """Build CORS origins list from settings + direct env var fallback."""
-    settings = get_settings()
-    origins = list(settings.cors_allow_origins)
-    if cors_env := os.getenv("CORS_ALLOW_ORIGINS"):
-        for raw in cors_env.strip("[]").split(","):
-            origin = raw.strip().strip('"').strip("'")
-            if origin and origin not in origins:
-                origins.append(origin)
-    return origins
-
-
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(
@@ -38,8 +25,8 @@ def create_app() -> FastAPI:
     )
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=_get_cors_origins(),
-        allow_credentials=True,
+        allow_origins=["*"],
+        allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
     )
