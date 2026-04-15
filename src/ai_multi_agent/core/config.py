@@ -5,6 +5,9 @@ from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+_env_file_path = Path(__file__).resolve().parents[3] / ".env"
+
+
 class Settings(BaseSettings):
     app_name: str = "AI Multi-Agent Starter"
     app_version: str = "0.1.0"
@@ -31,7 +34,7 @@ class Settings(BaseSettings):
     )
 
     model_config = SettingsConfigDict(
-        env_file=str(p) if (p := Path(__file__).resolve().parents[3] / ".env").exists() else None,
+        env_file=str(_env_file_path) if _env_file_path.exists() else None,
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
