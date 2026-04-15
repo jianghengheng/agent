@@ -1,7 +1,9 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import AliasChoices, Field
+from typing import Any
+
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -32,6 +34,13 @@ class Settings(BaseSettings):
             "http://localhost:5173",
         ]
     )
+
+    @field_validator("cors_allow_origins", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, v: Any) -> list[str]:
+        if isinstance(v, str) and not v.startswith("["):
+            return [s.strip() for s in v.split(",") if s.strip()]
+        return v
 
     model_config = SettingsConfigDict(
         env_file=str(_env_file_path) if _env_file_path.exists() else None,
