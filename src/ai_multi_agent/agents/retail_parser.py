@@ -882,53 +882,31 @@ def _build_answer_prompt(
     result: RetailQueryResult,
     conversation_bundle: ConversationContextBundle,
 ) -> str:
-    history_mode_label = {
-        "none": "no_history",
-        "raw": "raw_history",
-        "recent_only": "recent_history_only",
-        "summary": "summarized_history",
-    }[conversation_bundle.mode]
+    sections = [
+        f"当前日期：{result.current_date}",
+        f"问句类型：{result.query_type}",
+        f"用户问题：{task}",
+    ]
 
-    return "\n".join(
-        [
-            "你是零售经营助手，当前职责是：",
-            "1. 理解用户问题。",
-            "2. 如果是普通问题，就直接回答用户，不要模板化自我介绍。",
-            "3. 如果是零售经营问题，就结合已解析参数回答；"
-            "当前没有真实数据，请明确告知用户正在查询中或数据暂未获取到。",
-            "4. 输出必须是中文 Markdown。",
-            "",
-            "## 核心原则",
-            "- **严禁编造任何数字、金额、百分比或统计数据**。",
-            "- 不要从对话历史中提取数字来拼凑表格或列表。",
-            "- 如果当前没有真实数据，只描述已解析的参数，不要生成带有数值的表格。",
-            "- 不要使用 xxx、待统计 等占位符来伪造数据表格。",
-            "",
-            f"业务上下文：{context or '无'}",
-            f"当前日期：{result.current_date}",
-            f"上下文模式：{history_mode_label}",
-            f"问句类型：{result.query_type}",
-            f"用户问题：{task}",
-            f"关键词：{', '.join(result.keywords) if result.keywords else '未识别'}",
-            f"指标：{result.metric or '未识别'}",
-            f"店铺名称：{result.store_name or '未识别'}",
-            f"开始日期：{result.start_date or '未识别'}",
-            f"结束日期：{result.end_date or '未识别'}",
-            f"对比方式：{result.comparison_type or '未识别'}",
-            f"对比开始日期：{result.comparison_start_date or '未识别'}",
-            f"对比结束日期：{result.comparison_end_date or '未识别'}",
-            "",
-            "## 对话摘要",
-            conversation_bundle.summary or "无",
-            "",
-            "## 近期对话",
-            _format_messages(conversation_bundle.recent_messages),
-            "",
-            "回答要求：",
-            "- 优先结合上下文回答追问。",
-            "- 对普通问题，直接回答用户问题本身。",
-            "- 对零售问题，告知用户已识别到的查询参数，说明数据正在获取中。",
-            "- 如果当前问句省略了店铺、指标或时间，但上下文足够明确，可以自然继承。",
-            "- 如果上下文仍不足以明确零售参数，要明确指出缺失项。",
-        ]
-    )
+    if result.query_type == "retail_metric_query":
+        sections.append(
+            f"店铺：{result.store_name or '未识别'} | 指标：{result.metric or '未识别'} | "
+            f"时间：{result.start_date or '未识别'}~{result.end_date or '未识别'} | "
+            f"对比：{result.comparison_type or '未识别'}"
+        )
+
+    if context:
+        sections.append(f"业务上下文：{context}")
+
+    if conversation_bundle.summary:
+        sections.extend(["", "## 历史摘要", conversation_bundle.summary])
+
+    if conversation_bundle.recent_messages:
+        sections.extend(["", "## 近期对话", _format_messages(conversation_bundle.recent_messages)])
+
+    sections.extend([
+        "",
+        "要求：普通问题直接回答。零售问题说明已识别参数，告知数据获取中。严禁编造数字。输出中文Markdown。",
+    ])
+
+    return "\n".join(sections)

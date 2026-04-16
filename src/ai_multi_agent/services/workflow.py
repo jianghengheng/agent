@@ -360,52 +360,27 @@ def _build_final_answer_prompt(
 
     result = execution.result
     conversation_bundle = execution.conversation_bundle
-    metric_hint = f"用户关注的指标：{result.metric}" if result.metric else "用户未指定具体指标，请综合分析所有经营数据"
+    metric = result.metric or "综合"
 
     sections = [
-        "你是零售经营助手，已获取到真实经营数据。",
-        "请严格根据下方「接口返回数据」回答用户问题。",
-        "",
-        "## 核心原则",
-        "- **只使用下方接口返回的数据**，所有数值必须能在数据中找到出处。",
-        "- **严禁编造、推测或补充任何不在数据中的数字**。",
-        "- 如果数据中缺少某个指标或某家店铺的信息，明确告知用户「该数据暂未获取到」，不要自行填充。",
-        "- 增长率直接使用数据中提供的增长率字段，不要自行计算。",
-        "",
-        f"业务上下文：{context or '无'}",
         f"用户问题：{task}",
-        f"当前日期：{result.current_date}",
-        metric_hint,
-        f"店铺名称：{result.store_name or '全部'}",
-        f"时间范围：{result.start_date} ~ {result.end_date or result.start_date}",
-        f"对比方式：{result.comparison_type or '同比'}",
-        f"对比时间：{result.comparison_start_date} ~ {result.comparison_end_date or result.comparison_start_date}",
-        "",
-        "## 接口返回数据",
-        research,
+        f"店铺：{result.store_name or '全部'} | 时间：{result.start_date}~{result.end_date or result.start_date} | 对比：{result.comparison_type or '同比'}（{result.comparison_start_date}~{result.comparison_end_date or result.comparison_start_date}） | 指标：{metric}",
     ]
 
+    if context:
+        sections.append(f"业务上下文：{context}")
+
+    sections.extend(["", "## 数据", research])
+
     if conversation_bundle.summary:
-        sections.extend([
-            "",
-            "## 历史对话摘要",
-            conversation_bundle.summary,
-        ])
+        sections.extend(["", "## 历史摘要", conversation_bundle.summary])
+
+    if conversation_bundle.recent_messages:
+        sections.extend(["", "## 近期对话", _format_messages(conversation_bundle.recent_messages)])
 
     sections.extend([
         "",
-        "## 近期对话",
-        _format_messages(conversation_bundle.recent_messages),
-        "",
-        "## 回答要求",
-        "- 结合上下文和近期对话理解用户意图，优先回答追问。",
-        "- 直接回答用户问题，引用数据中的具体数值。",
-        "- 综合分析销售额、毛利、会员、客流、人效等多个维度。",
-        "- 对比分析要清晰，增长率用百分比表示。",
-        "- 主动发现数据中的异常和亮点。",
-        "- 金额保留两位小数，百分比保留一位小数。",
-        "- 结尾给出简短经营建议。",
-        "- 输出中文 Markdown 格式。",
+        "要求：只用上方数据回答，严禁编造数字。引用具体数值，增长率用数据原值。缺失数据直接说明。金额保留两位小数，百分比一位小数。输出中文Markdown，结尾给简短建议。",
     ])
 
     return "\n".join(sections)

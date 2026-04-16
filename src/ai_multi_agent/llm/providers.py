@@ -9,7 +9,7 @@ from typing import Protocol
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
-STREAM_BATCH_CHARACTER_LIMIT = 48
+STREAM_BATCH_CHARACTER_LIMIT = 1
 
 
 class LLMClient(Protocol):
@@ -116,7 +116,7 @@ def _get_chat_client(
         model=model,
         api_key=api_key,
         base_url=base_url,
-        temperature=0.5,
+        temperature=0,
         streaming=streaming,
     )
 
