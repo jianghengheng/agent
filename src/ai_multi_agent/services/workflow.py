@@ -1,6 +1,8 @@
 import asyncio
 import logging
+import re
 from collections.abc import AsyncIterator
+from datetime import date
 from typing import cast
 
 from ai_multi_agent.agents.data_fetcher import DataFetcherAgent
@@ -55,6 +57,36 @@ class MultiAgentWorkflowService:
                     "max_revisions": 0,
                 },
             }
+
+            # ── Fast path: trivial questions answered locally, no LLM call ──
+            fast_answer = _try_fast_answer(request.task)
+            if fast_answer is not None:
+                logger.info("fast path hit for task=%r", request.task)
+                state["final_answer"] = fast_answer
+                state["plan"] = "## 解析计划\n- 问句类型：normal_chat（快速通道）"
+                state["approved"] = True
+                state["revision_count"] = 0
+                state["trace"] = ["parser: fast path – no LLM needed"]
+
+                yield {
+                    "event": "answer_started",
+                    "data": {"step": "parser", "message": "fast answer"},
+                }
+                yield {
+                    "event": "answer_delta",
+                    "data": {"delta": fast_answer},
+                }
+                yield {
+                    "event": "run_completed",
+                    "data": {
+                        "response": self._build_response(
+                            backend=backend, state=state
+                        ).model_dump(mode="json")
+                    },
+                }
+                return
+
+            # ── Normal path ──
 
             yield {
                 "event": "step_started",
@@ -262,6 +294,59 @@ class MultiAgentWorkflowService:
             final_answer=str(state.get("final_answer", "")),
             trace=list(state.get("trace", [])),
         )
+
+
+_WEEKDAY_NAMES = ("一", "二", "三", "四", "五", "六", "日")
+
+_DATE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"今天.{0,2}(几号|几月|什么日期|什么日子|哪天|多少号)"), "date"),
+    (re.compile(r"(几号|几月几号|什么日期|什么日子)"), "date"),
+    (re.compile(r"今天是.{0,4}(号|日期|日子)"), "date"),
+    (re.compile(r"(星期几|周几|礼拜几)"), "weekday"),
+    (re.compile(r"现在.{0,2}(几点|什么时间|时间)"), "time"),
+]
+
+_GREETING_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"^(你好|您好|hi|hello|hey)[\s!！。.？?]*$", re.IGNORECASE), "greeting"),
+    (re.compile(r"^(谢谢|感谢|thanks|thank you)[\s!！。.？?]*$", re.IGNORECASE), "thanks"),
+    (re.compile(r"^(再见|拜拜|bye)[\s!！。.？?]*$", re.IGNORECASE), "bye"),
+    (re.compile(r"^你是谁[\s？?]*$"), "who"),
+    (re.compile(r"^你叫什么[\s？?]*$"), "who"),
+    (re.compile(r"^(介绍一下你|自我介绍)[\s？?]*$"), "who"),
+]
+
+
+def _try_fast_answer(task: str) -> str | None:
+    """Return an instant answer for trivial questions, or None to fall through to LLM."""
+    stripped = task.strip()
+    today = date.today()
+
+    for pattern, kind in _DATE_PATTERNS:
+        if pattern.search(stripped):
+            if kind == "date":
+                return (
+                    f"今天是 **{today.year} 年 {today.month} 月 {today.day} 号**，"
+                    f"星期{_WEEKDAY_NAMES[today.weekday()]}。"
+                )
+            if kind == "weekday":
+                return f"今天是星期{_WEEKDAY_NAMES[today.weekday()]}。"
+            if kind == "time":
+                from datetime import datetime
+                now = datetime.now()
+                return f"现在是 {now.hour}:{now.minute:02d}。"
+
+    for pattern, kind in _GREETING_PATTERNS:
+        if pattern.search(stripped):
+            if kind == "greeting":
+                return "你好！有什么可以帮你的吗？"
+            if kind == "thanks":
+                return "不客气，随时可以问我！"
+            if kind == "bye":
+                return "再见，祝你一切顺利！"
+            if kind == "who":
+                return "我是零售经营助手，可以帮你查询和分析店铺的经营数据，也可以回答日常问题。"
+
+    return None
 
 
 def _build_final_answer_prompt(

@@ -136,13 +136,20 @@ class RetailParserAgent(BaseAgent):
         )
 
     async def resolve_dates_only(self, state: WorkflowState) -> RetailQueryResult:
-        """Only resolve dates (LLM call). Returns quickly for non-retail queries."""
+        """Resolve dates with rule-based extraction first, LLM fallback for ambiguous cases."""
         task = state.get("task", "")
         history_messages = _normalize_history_messages(state.get("messages", []))
         result = parse_retail_query(task, history_messages=history_messages)
-        if result.query_type == "retail_metric_query":
-            return await self._resolve_dates_with_llm(task, result, history_messages)
-        return result
+        if result.query_type != "retail_metric_query":
+            return result
+
+        # Try rule-based date extraction first (instant, no LLM call)
+        rule_result = _try_extract_dates_by_rules(task, result, history_messages)
+        if rule_result is not None:
+            return rule_result
+
+        # Fallback to LLM for ambiguous date expressions
+        return await self._resolve_dates_with_llm(task, result, history_messages)
 
     async def prepare_context_only(
         self, state: WorkflowState, resolved_result: RetailQueryResult,
@@ -469,6 +476,144 @@ def _should_treat_as_retail_query(
         return True
 
     return False
+
+
+_MONTH_PATTERN = re.compile(r"(\d{1,2})\s*月")
+_YEAR_MONTH_PATTERN = re.compile(r"(?:(\d{4})\s*年\s*)?(\d{1,2})\s*月")
+_EXACT_DATE_PATTERN = re.compile(
+    r"(?:(\d{4})\s*年\s*)?(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]"
+)
+
+
+def _try_extract_dates_by_rules(
+    task: str,
+    result: RetailQueryResult,
+    history_messages: list[ConversationMessage],
+) -> RetailQueryResult | None:
+    """Try to extract date range from common Chinese time expressions using rules.
+
+    Returns a fully resolved RetailQueryResult if successful, or None to fall back to LLM.
+    """
+    today = date.fromisoformat(result.current_date)
+    comparison_type = _extract_explicit_comparison_type(task) or "同比"
+
+    start_date: date | None = None
+    end_date: date | None = None
+
+    # ── Exact date: "2024年3月15日", "3月15号" ──
+    m = _EXACT_DATE_PATTERN.search(task)
+    if m:
+        year = int(m.group(1)) if m.group(1) else today.year
+        month = int(m.group(2))
+        day = int(m.group(3))
+        try:
+            start_date = end_date = date(year, month, day)
+        except ValueError:
+            pass
+
+    # ── Today / yesterday ──
+    if start_date is None:
+        if "今天" in task or "今日" in task:
+            start_date = end_date = today
+        elif "昨天" in task or "昨日" in task:
+            start_date = end_date = today - timedelta(days=1)
+        elif "前天" in task:
+            start_date = end_date = today - timedelta(days=2)
+
+    # ── Week ──
+    if start_date is None:
+        if "本周" in task or "这周" in task:
+            start_date = today - timedelta(days=today.weekday())
+            end_date = start_date + timedelta(days=6)
+        elif "上周" in task:
+            last_monday = today - timedelta(days=today.weekday() + 7)
+            start_date = last_monday
+            end_date = last_monday + timedelta(days=6)
+
+    # ── Month ──
+    if start_date is None:
+        if "本月" in task or "这个月" in task or "这月" in task:
+            start_date = today.replace(day=1)
+            end_date = today.replace(day=calendar.monthrange(today.year, today.month)[1])
+        elif "上个月" in task or "上月" in task:
+            first_of_this_month = today.replace(day=1)
+            last_month_end = first_of_this_month - timedelta(days=1)
+            start_date = last_month_end.replace(day=1)
+            end_date = last_month_end
+
+    # ── "去年N月", "N月" ──
+    if start_date is None:
+        ym = _YEAR_MONTH_PATTERN.search(task)
+        if ym:
+            year = int(ym.group(1)) if ym.group(1) else None
+            month = int(ym.group(2))
+            if 1 <= month <= 12:
+                if year is None:
+                    if "去年" in task:
+                        year = today.year - 1
+                    elif "前年" in task:
+                        year = today.year - 2
+                    else:
+                        year = today.year
+                last_day = calendar.monthrange(year, month)[1]
+                start_date = date(year, month, 1)
+                end_date = date(year, month, last_day)
+
+    # ── "去年" (without specific month) ──
+    if start_date is None:
+        if "去年" in task:
+            start_date = date(today.year - 1, 1, 1)
+            end_date = date(today.year - 1, 12, 31)
+        elif "前年" in task:
+            start_date = date(today.year - 2, 1, 1)
+            end_date = date(today.year - 2, 12, 31)
+
+    if start_date is None:
+        # ── Inherit from conversation history ──
+        for msg in reversed(history_messages):
+            if msg["role"] != "user":
+                continue
+            hist_result = parse_retail_query(msg["content"], today=today, history_messages=[])
+            if hist_result.query_type == "retail_metric_query":
+                hist_resolved = _try_extract_dates_by_rules(
+                    msg["content"], hist_result, [],
+                )
+                if hist_resolved and hist_resolved.start_date:
+                    start_date = date.fromisoformat(hist_resolved.start_date)
+                    end_date = date.fromisoformat(hist_resolved.end_date) if hist_resolved.end_date else start_date
+                    break
+        # If still nothing, fall back to LLM
+        if start_date is None:
+            return None
+
+    if end_date is None:
+        end_date = start_date
+
+    start_str = start_date.isoformat()
+    end_str = end_date.isoformat()
+    comp_start, comp_end = _build_comparison_date_range(
+        start_date=start_str,
+        end_date=end_str,
+        comparison_type=comparison_type,
+    )
+
+    print(f"\n⚡ 规则日期解析结果：start={start_str}, end={end_str}, "
+          f"comparison_type={comparison_type}, "
+          f"comp_start={comp_start}, comp_end={comp_end}")
+
+    return RetailQueryResult(
+        query_type=result.query_type,
+        keywords=result.keywords,
+        metric=result.metric,
+        store_name=result.store_name,
+        store_flag=result.store_flag,
+        start_date=start_str,
+        end_date=end_str,
+        comparison_type=comparison_type,
+        comparison_start_date=comp_start,
+        comparison_end_date=comp_end,
+        current_date=result.current_date,
+    )
 
 
 DATE_EXTRACTION_PROMPT = """\
