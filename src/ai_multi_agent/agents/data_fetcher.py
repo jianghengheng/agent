@@ -196,40 +196,76 @@ class DataFetcherAgent(BaseAgent):
             return None
 
 
+_ALL_COLUMNS: list[tuple[str, str]] = [
+    ("salesAmount", "销售额"),
+    ("salesAmountGrowthRate", "销售增长"),
+    ("netProfit", "毛利"),
+    ("netProfitGrowthRate", "毛利增长"),
+    ("salesAmountMember", "会员销额"),
+    ("salesAmountMemberGrowthRate", "会员销额增长"),
+    ("activeMemberCount", "活跃会员"),
+    ("newMemberCount", "新增会员"),
+    ("passByCount", "过店人数"),
+    ("enterRate", "进店率"),
+    ("buyRate", "成交率"),
+    ("salesAmountPerStaff", "人效"),
+    ("salesAmountCake", "蛋糕销额"),
+    ("salesAmountBaked", "现烤销额"),
+    ("salesAmountOnline", "线上销额"),
+    ("storeCost", "门店费用"),
+    ("netIncome", "门店贡献"),
+]
+
+_METRIC_COLUMN_MAP: dict[str | None, list[str]] = {
+    "销售额": ["salesAmount", "salesAmountGrowthRate"],
+    "销售":   ["salesAmount", "salesAmountGrowthRate"],
+    "GMV":    ["salesAmount", "salesAmountGrowthRate"],
+    "利润":   ["netProfit", "netProfitGrowthRate"],
+    "毛利":   ["netProfit", "netProfitGrowthRate"],
+    "业绩":   ["salesAmount", "salesAmountGrowthRate", "netProfit", "netProfitGrowthRate"],
+    "会员":   ["salesAmountMember", "salesAmountMemberGrowthRate", "activeMemberCount", "newMemberCount"],
+    "客流":   ["passByCount", "enterRate", "buyRate"],
+    "人效":   ["salesAmountPerStaff"],
+}
+
+# Columns always included so LLM can identify each row.
+_BASE_KEYS = {"columnName", "columnType"}
+
+
+def _select_columns(metric: str | None) -> list[tuple[str, str]]:
+    """Pick only the columns relevant to the user's metric query."""
+    if not metric:
+        return _ALL_COLUMNS
+
+    wanted = set(_METRIC_COLUMN_MAP.get(metric, []))
+    if not wanted:
+        return _ALL_COLUMNS
+
+    return [(key, label) for key, label in _ALL_COLUMNS if key in wanted]
+
+
 def _summarize_api_data(api_data: list[dict], *, metric: str | None) -> str:
     if not api_data:
         return "无数据"
 
-    header = (
-        "名称|类型|销售额|销售增长|毛利|毛利增长|会员销额|会员销额增长"
-        "|活跃会员|新增会员|过店人数|进店率|成交率|人效"
-        "|蛋糕销额|现烤销额|线上销额|门店费用|门店贡献"
-    )
+    columns = _select_columns(metric)
+
+    header_parts = ["名称", "类型"] + [label for _, label in columns]
+    header = "|".join(header_parts)
     lines: list[str] = [f"共 {len(api_data)} 条记录", "", header]
 
     for item in api_data:
-        row = "|".join([
+        parts: list[str] = [
             str(item.get("columnName", "")),
             str(item.get("columnType", "")),
-            str(item.get("salesAmount", 0)),
-            _format_rate(item.get("salesAmountGrowthRate")),
-            str(item.get("netProfit", 0)),
-            _format_rate(item.get("netProfitGrowthRate")),
-            str(item.get("salesAmountMember", 0)),
-            _format_rate(item.get("salesAmountMemberGrowthRate")),
-            str(item.get("activeMemberCount", 0)),
-            str(item.get("newMemberCount", 0)),
-            str(item.get("passByCount", 0)),
-            _format_rate(item.get("enterRate")),
-            _format_rate(item.get("buyRate")),
-            str(item.get("salesAmountPerStaff", 0)),
-            str(item.get("salesAmountCake", 0)),
-            str(item.get("salesAmountBaked", 0)),
-            str(item.get("salesAmountOnline", 0)),
-            str(item.get("storeCost", "")),
-            str(item.get("netIncome", "")),
-        ])
-        lines.append(row)
+        ]
+        for key, _ in columns:
+            value = item.get(key)
+            if "Rate" in key or key in ("enterRate", "buyRate"):
+                parts.append(_format_rate(value))
+            else:
+                parts.append(str(value if value is not None else 0))
+        lines.append("|".join(parts))
 
     return "\n".join(lines)
 
